@@ -177,6 +177,12 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
     fs::set_permissions(RECOVERY_LABELS, std::os::unix::fs::PermissionsExt::from_mode(0o755))
         .with_context(|| format!("open {RECOVERY_LABELS} to every user"))?;
     fs::copy(from, &into).with_context(|| format!("copy {} to {}", from.display(), into.display()))?;
+    // A recovery of another make may carry no description folder at all,
+    // and the directory reads it as the user its init script names.
+    let folder = Path::new(RECOVERY_MANIFEST).parent().expect("the description is in a folder");
+    fs::create_dir_all(folder).with_context(|| format!("make {}", folder.display()))?;
+    fs::set_permissions(folder, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .with_context(|| format!("open {} to every user", folder.display()))?;
     fs::write(RECOVERY_MANIFEST, describe_hardware(wanted)?).with_context(|| format!("write {RECOVERY_MANIFEST}"))?;
     fs::set_permissions(RECOVERY_MANIFEST, std::os::unix::fs::PermissionsExt::from_mode(0o644))
         .with_context(|| format!("let every user read {RECOVERY_MANIFEST}"))?;

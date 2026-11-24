@@ -21,6 +21,8 @@ mod input;
 mod keys;
 #[cfg(target_os = "android")]
 mod merge;
+#[cfg(any(target_os = "android", test))]
+mod panel;
 #[cfg(target_os = "android")]
 mod partwork;
 #[cfg(target_os = "android")]

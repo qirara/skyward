@@ -18,9 +18,9 @@ libc = { workspace = true }
 lz4_flex = "0.14.0"
 p256 = { version = "0.13.2", features = ["pkcs8"] }
 polyfuse-kernel = "0.2.0"
-rsa = "0.9.10"
-sha1 = { version = "0.10.7", features = ["oid"] }
-sha2 = { version = "0.10.9", features = ["oid"] }
+rsa = { version = "0.10.0", features = ["pkcs1v15"] }
+sha1 = "0.11.0"
+sha2 = "0.11.1"
 skyward-block = { path = "../skyward-block" }
 skyward-config = { path = "../skyward-config" }
 skyward-info = { path = "../skyward-info" }

@@ -7,9 +7,12 @@ use anyhow::{bail, ensure, Context, Result};
 use cms::content_info::ContentInfo;
 use cms::signed_data::SignedData;
 use p256::ecdsa::signature::hazmat::PrehashVerifier;
-use rsa::pkcs8::DecodePublicKey;
+// The RSA keys' and the P-256 keys' decoders, each its own crate's.
+use p256::pkcs8::DecodePublicKey as _;
+use rsa::pkcs1v15::Pkcs1v15Sign;
+use rsa::pkcs8::DecodePublicKey as _;
 use rsa::traits::PublicKeyParts;
-use rsa::{BigUint, Pkcs1v15Sign, RsaPublicKey};
+use rsa::PublicKey as RsaPublicKey;
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
@@ -118,9 +121,10 @@ fn key(pem: &[u8]) -> Result<Key> {
     let public = match info.algorithm.oid {
         RSA_KEY => {
             let rsa = RsaPublicKey::from_public_key_der(&der).context("read the RSA key")?;
-            let bits = rsa.n().bits();
+            let bits = rsa.n().bit_width();
             ensure!(bits == 2048 || bits == 4096, "an RSA key of {bits} bits is not taken");
-            ensure!([3u32, 65537].map(BigUint::from).contains(rsa.e()), "an RSA key with the exponent {} is not taken", rsa.e());
+            let e = rsa.e_bytes();
+            ensure!(matches!(*e, [3] | [1, 0, 1]), "an RSA key with the exponent 0x{} is not taken", e.iter().map(|b| format!("{b:02x}")).collect::<String>());
             Public::Rsa(rsa)
         }
         EC_KEY => Public::Ec(p256::PublicKey::from_public_key_der(&der).context("read the key as a P-256 key")?.into()),

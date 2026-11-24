@@ -2378,6 +2378,17 @@ dependencies = [
 
 [[package]]
 name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
+]
+
+[[package]]
+name = "sha1"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
@@ -2540,8 +2551,10 @@ dependencies = [
  "abootimg-oxide",
  "anyhow",
  "cpio",
+ "flate2",
  "libc",
  "lz4_flex 0.14.0",
+ "sha1 0.10.7",
  "tempfile",
 ]
 
@@ -2608,7 +2621,7 @@ dependencies = [
  "p256",
  "polyfuse-kernel",
  "rsa",
- "sha1",
+ "sha1 0.11.0",
  "sha2 0.11.1",
  "skyward-block",
  "skyward-bootimg",
@@ -2694,13 +2707,16 @@ dependencies = [
  "anyhow",
  "clap",
  "hex",
+ "md-5",
+ "rsa",
  "rust-fs-core",
  "rust-fs-erofs",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.1",
  "skyward-bootimg",
  "skyward-config",
  "skyward-programs",
+ "tar",
  "tempfile",
  "unpayload",
 ]
@@ -3191,7 +3207,7 @@ dependencies = [
  "object",
  "prost",
  "rayon",
- "sha1",
+ "sha1 0.11.0",
  "sha2 0.11.1",
  "tempfile",
  "thiserror",

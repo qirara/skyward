@@ -84,6 +84,54 @@ pub struct DeviceConfig {
     /// The stock build the recovery is made on.
     #[serde(default)]
     pub stock: Option<Stock>,
+    /// The recovery image the recovery is built on, where it is not the
+    /// stock one `[stock]` takes out of a full update package.
+    #[serde(default)]
+    pub base: Base,
+}
+
+/// The recovery image Skyward is built on, as the builder gives it to the
+/// packer: on most phones the stock one, and on a phone whose own recovery
+/// does not bring Skyward up, a recovery of another make that does, such
+/// as TWRP's or OrangeFox's.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Base {
+    /// Whether it is a recovery of another make. Its own program and theme
+    /// give way to Skyward, the programs it carries under the names
+    /// install scripts look for become Skyward, and the phone's hardware
+    /// services are run on their own libraries before the recovery's,
+    /// which are older than the vendor partition they were built for.
+    #[serde(default)]
+    pub third_party: bool,
+    /// The SHA-256 the image is checked against before anything is built on
+    /// it, in lowercase hex: a recovery of another make is a download of
+    /// its own, and the one the configuration was made on is the one the
+    /// image is built on.
+    #[serde(default)]
+    pub sha256: Option<String>,
+    /// The recovery partition's size in bytes, where the image is not the
+    /// whole partition ending in its AVB footer, as a recovery taken out
+    /// of an Odin tar or a flashable zip is not.
+    #[serde(default)]
+    pub partition_size: Option<u64>,
+    /// Files of its ramdisk the image leaves out, as the archive names
+    /// them: what only its own program used, where the partition has no
+    /// room for it beside Skyward. A name ending in `/` leaves out every
+    /// file under that folder.
+    #[serde(default)]
+    pub drop: Vec<String>,
+    /// Whether the image carries the rules that give the USB port
+    /// Skyward's file transfer beside adb. They build on the USB rules of
+    /// the stock recovery's init; a recovery of another make may set its
+    /// port up otherwise, and is then left with adb alone.
+    #[serde(default = "default_true")]
+    pub mtp: bool,
+}
+
+impl Default for Base {
+    fn default() -> Self {
+        Base { third_party: false, sha256: None, partition_size: None, drop: Vec::new(), mtp: true }
+    }
 }
 
 /// The stock build a recovery is made on: the phone maker's full update
@@ -579,6 +627,19 @@ impl DeviceConfig {
                 ensure!(path.is_absolute() && plain && path.file_name().is_some(), "[[owners]] paths: {file} is not an absolute path to a file");
             }
         }
+        let lower_hex_sha256 = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if let Some(sum) = &cfg.base.sha256 {
+            ensure!(lower_hex_sha256(sum), "[base] sha256: {sum} is not a SHA-256 in lowercase hex");
+        }
+        if let Some(size) = cfg.base.partition_size {
+            ensure!(size > 0 && size % 4096 == 0, "[base] partition_size: {size} is not a partition's size, a whole number of 4096-byte blocks");
+        }
+        for name in &cfg.base.drop {
+            let path = Path::new(name.trim_end_matches('/'));
+            let plain = path.components().all(|c| matches!(c, std::path::Component::Normal(_)));
+            ensure!(plain && path.file_name().is_some(), "[base] drop: {name} is not a path inside the ramdisk");
+        }
+        ensure!(cfg.base.third_party || cfg.base.drop.is_empty(), "[base] drop: only a recovery of another make has files of its own to leave out");
         if let Some(stock) = &cfg.stock {
             let name = stock.package.rsplit('/').next().unwrap_or_default();
             ensure!(
@@ -587,11 +648,8 @@ impl DeviceConfig {
                 stock.package,
                 stock.version
             );
-            ensure!(
-                stock.recovery.len() == 64 && stock.recovery.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-                "[stock] recovery: {} is not a SHA-256 in lowercase hex",
-                stock.recovery
-            );
+            ensure!(lower_hex_sha256(&stock.recovery), "[stock] recovery: {} is not a SHA-256 in lowercase hex", stock.recovery);
+            ensure!(!cfg.base.third_party, "[stock] and a [base] of another make: the recovery is built on one of them");
         }
         if let Some(wlan) = &cfg.wlan {
             ensure!(wlan.probe.starts_with("http://"), "[wlan] probe: {} is not a plain HTTP address", wlan.probe);
@@ -681,6 +739,27 @@ mod tests {
             let s = format!("{resonance}\nstrength = {{ lightest = {lightest:?}, strongest = {strongest:?} }}");
             assert!(with(&s).is_err(), "{lightest} to {strongest} is refused");
         }
+    }
+
+    #[test]
+    fn a_base_of_another_make_is_checked_sized_and_trimmed() {
+        let with = |body: &str| DeviceConfig::parse(&format!("[device]\ncodename = \"x\"\n[base]\n{body}\n"));
+        let plain = DeviceConfig::parse("[device]\ncodename = \"x\"\n").unwrap().base;
+        assert_eq!(plain, Base::default());
+        assert!(!plain.third_party && plain.mtp, "a stock recovery, with file transfer, unless told otherwise");
+        let sum = "4abbbcdc842f3d4879206e9695d52709603e52dd68d3c1fff04b3b5e7a308ecf";
+        let base = with(&format!("third_party = true\nsha256 = \"{sum}\"\npartition_size = 81788928\ndrop = [\"twres/fonts/a.ttf\", \"twres/\"]\nmtp = false"))
+            .unwrap()
+            .base;
+        assert_eq!((base.sha256.as_deref(), base.partition_size, base.mtp), (Some(sum), Some(81_788_928), false));
+        assert!(with(&format!("sha256 = \"{}\"", sum.to_uppercase())).is_err(), "in lowercase");
+        assert!(with("partition_size = 1000").is_err(), "not a whole number of blocks");
+        assert!(with("third_party = true\ndrop = [\"../etc/passwd\"]").is_err(), "a path out of the ramdisk");
+        assert!(with("third_party = true\ndrop = [\"/init\"]").is_err(), "a path from the top of the computer");
+        assert!(with("drop = [\"twres/\"]").is_err(), "a stock recovery has nothing of its own to leave out");
+        let stock = "[stock]\nversion = \"V\"\npackage = \"https://d.example/V/x-V.zip\"\nrecovery = \"{sum}\"\n";
+        let both = format!("[device]\ncodename = \"x\"\n{}[base]\nthird_party = true\n", stock.replace("{sum}", sum));
+        assert!(DeviceConfig::parse(&both).is_err(), "built on the stock recovery and on another at once");
     }
 
     #[test]

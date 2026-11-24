@@ -9,6 +9,9 @@ target/
 keystore.properties
 *.p12
 *.pem
+# AOSP's published AVB test keys (external/avb/test/data), which the
+# packer's tests sign with: anyone's to read, and no one's own key.
+!crates/skyward-pack/tests/testkey_rsa*.pem
 *.cer
 BRIEF.md
 NOTES.md

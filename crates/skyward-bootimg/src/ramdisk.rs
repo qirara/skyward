@@ -1,5 +1,6 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use cpio::{NewcBuilder, NewcReader};
+use flate2::{bufread::MultiGzDecoder, write::GzEncoder};
 use std::ffi::{CString, OsStr};
 use std::fs;
 use std::io::{Cursor, Read, Write};
@@ -49,11 +50,20 @@ pub struct Ramdisk {
 }
 
 impl Ramdisk {
-    /// Unpack an LZ4 (legacy framing) compressed newc archive, as Android
-    /// boot images carry.
+    /// Unpack a newc archive as Android boot images carry it: compressed
+    /// with LZ4, in its legacy framing or its frame format, with gzip, or
+    /// not at all, whichever [`Compression::of`] finds it in.
     pub fn decode(compressed: &[u8]) -> Result<Self> {
         let mut cpio = Vec::new();
-        lz4_flex::frame::FrameDecoder::new(compressed).read_to_end(&mut cpio).context("lz4 decode")?;
+        match Compression::of(compressed)? {
+            Compression::Lz4 => {
+                lz4_flex::frame::FrameDecoder::new(compressed).read_to_end(&mut cpio).context("lz4 decode")?;
+            }
+            Compression::Gzip => {
+                MultiGzDecoder::new(compressed).read_to_end(&mut cpio).context("gzip decode")?;
+            }
+            Compression::None => cpio.extend_from_slice(compressed),
+        }
         let mut entries = Vec::new();
         let mut rest = Cursor::new(cpio.as_slice());
         loop {
@@ -85,6 +95,22 @@ impl Ramdisk {
     /// unpacker reads no other LZ4 framing) at its highest compression.
     pub fn encode(&self) -> Result<Vec<u8>> {
         lz4_tool(&self.archive()?)
+    }
+
+    /// Pack as a newc archive compressed as `compression` says, as the image
+    /// an image is built over had it: the kernel that unpacks the ramdisk may
+    /// be built to read that compression alone. LZ4 is packed as
+    /// [`encode`](Self::encode) packs it, gzip at its highest compression.
+    pub fn encode_as(&self, compression: Compression) -> Result<Vec<u8>> {
+        match compression {
+            Compression::Lz4 => self.encode(),
+            Compression::Gzip => {
+                let mut gz = GzEncoder::new(Vec::new(), flate2::Compression::best());
+                gz.write_all(&self.archive()?).context("gzip encode")?;
+                gz.finish().context("gzip encode")
+            }
+            Compression::None => self.archive(),
+        }
     }
 
     /// Pack as a newc archive, uncompressed.
@@ -165,6 +191,44 @@ impl Ramdisk {
         }
     }
 
+    /// Point `name` to `target` as [`link`](Self::link) does, where a
+    /// regular file of that name gives way to the link as well: a recovery
+    /// of another make carries programs of its own under the names install
+    /// scripts look for, and the recovery binary answers to those.
+    pub fn link_over(&mut self, name: &str, target: &str) -> Result<()> {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.name == name)
+            && e.mode & S_IFMT == S_IFREG
+        {
+            e.mode = S_IFLNK | LINK_MODE;
+            e.data = target.as_bytes().to_vec();
+            return Ok(());
+        }
+        self.link(name, target)
+    }
+
+    /// Take the regular file `name` out of the archive.
+    pub fn remove(&mut self, name: &str) -> Result<()> {
+        match self.entries.iter().position(|e| e.name == name) {
+            Some(i) if self.entries[i].mode & S_IFMT == S_IFREG => {
+                self.entries.remove(i);
+                Ok(())
+            }
+            Some(_) => bail!("{name} is not a regular file"),
+            None => bail!("{name} is not in the ramdisk"),
+        }
+    }
+
+    /// Take every regular file under the folder `dir` out of the archive,
+    /// leaving the folders. A folder that holds none is an error, as a name
+    /// that is no longer there is.
+    pub fn remove_tree(&mut self, dir: &str) -> Result<()> {
+        let prefix = format!("{}/", dir.trim_end_matches('/'));
+        let before = self.entries.len();
+        self.entries.retain(|e| !(e.mode & S_IFMT == S_IFREG && e.name.starts_with(&prefix)));
+        ensure!(self.entries.len() < before, "{dir} holds no file in the ramdisk");
+        Ok(())
+    }
+
     fn insert(&mut self, name: &str, mode: u32, data: Vec<u8>) -> Result<()> {
         if self.find(name).is_some() {
             bail!("{name} is already in the ramdisk");
@@ -184,6 +248,35 @@ impl Ramdisk {
         }
         self.entries.push(root_entry(name, mode, data));
         Ok(())
+    }
+}
+
+/// How a ramdisk's archive is compressed, by its first bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compression {
+    /// LZ4, as AOSP packs ramdisks: in the legacy framing, which is all
+    /// the kernel's initramfs unpacker reads, or in LZ4's frame format.
+    Lz4,
+    /// gzip, as Samsung's recoveries and the recoveries of older trees
+    /// are packed.
+    Gzip,
+    /// The archive itself.
+    None,
+}
+
+impl Compression {
+    /// The compression `packed` is in.
+    pub fn of(packed: &[u8]) -> Result<Compression> {
+        const LZ4_FRAME: [u8; 4] = [0x04, 0x22, 0x4d, 0x18];
+        if packed.starts_with(&LZ4_LEGACY_MAGIC.to_le_bytes()) || packed.starts_with(&LZ4_FRAME) {
+            Ok(Compression::Lz4)
+        } else if packed.starts_with(&[0x1f, 0x8b]) {
+            Ok(Compression::Gzip)
+        } else if packed.starts_with(b"070701") {
+            Ok(Compression::None)
+        } else {
+            bail!("the ramdisk is in no compression this reads: it starts {:02x?}", &packed[..packed.len().min(4)])
+        }
     }
 }
 
@@ -428,6 +521,74 @@ mod tests {
         let rd = Ramdisk { entries: vec![mine("lib", S_IFREG | 0o644, b"a file")] };
         assert!(rd.unpack(dir.path()).is_err());
         assert!(dir.path().join("lib/modules.load").exists());
+    }
+
+    #[test]
+    fn a_ramdisk_keeps_the_compression_it_came_in() {
+        let mut rd = Ramdisk { entries: Vec::new() };
+        rd.add("system/bin/recovery", 0o750, b"binary".to_vec()).unwrap();
+        for compression in [Compression::Lz4, Compression::Gzip, Compression::None] {
+            let packed = rd.encode_as(compression).unwrap();
+            assert_eq!(Compression::of(&packed).unwrap(), compression);
+            let back = Ramdisk::decode(&packed).unwrap();
+            assert_eq!(back.find("system/bin/recovery").unwrap().data, b"binary", "{compression:?}");
+        }
+        let mut frame = lz4_flex::frame::FrameEncoder::new(Vec::new());
+        frame.write_all(&rd.archive().unwrap()).unwrap();
+        let frame = frame.finish().unwrap();
+        assert_eq!(Compression::of(&frame).unwrap(), Compression::Lz4, "LZ4's frame format");
+        assert!(Ramdisk::decode(&frame).unwrap().find("system/bin").is_some());
+        assert!(Compression::of(b"BZh91AY").is_err(), "bzip2 is not read");
+    }
+
+    #[test]
+    fn gzip_members_one_after_another_are_read_as_one_stream() {
+        let mut rd = Ramdisk { entries: Vec::new() };
+        rd.add("init", 0o750, b"program".to_vec()).unwrap();
+        rd.add("system/bin/recovery", 0o750, vec![0x5a; 4000]).unwrap();
+        // The kernel's gunzip goes on from one member into the next, so an
+        // archive may be split across them anywhere.
+        let archive = rd.archive().unwrap();
+        let (head, tail) = archive.split_at(archive.len() / 2);
+        let member = |part: &[u8]| {
+            let mut gz = GzEncoder::new(Vec::new(), flate2::Compression::default());
+            gz.write_all(part).unwrap();
+            gz.finish().unwrap()
+        };
+        let back = Ramdisk::decode(&[member(head), member(tail)].concat()).unwrap();
+        assert_eq!(back.find("system/bin/recovery").unwrap().data.len(), 4000, "the second member's half is read too");
+    }
+
+    #[test]
+    fn a_file_or_a_folders_files_are_taken_out_and_a_missing_one_is_an_error() {
+        let mut rd = Ramdisk { entries: Vec::new() };
+        rd.add("twres/fonts/a.ttf", 0o644, b"a".to_vec()).unwrap();
+        rd.add("twres/languages/en.xml", 0o644, b"b".to_vec()).unwrap();
+        rd.add("system/bin/recovery", 0o750, b"c".to_vec()).unwrap();
+        rd.remove("system/bin/recovery").unwrap();
+        assert!(rd.remove("system/bin/recovery").is_err(), "it is gone");
+        assert!(rd.remove("system/bin").is_err(), "a folder is not a regular file");
+        rd.remove_tree("twres/").unwrap();
+        let names: Vec<&str> = rd.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["twres", "twres/fonts", "twres/languages", "system", "system/bin"], "the folders stay");
+        assert!(rd.remove_tree("twres").is_err(), "nothing is left to take out");
+    }
+
+    #[test]
+    fn a_program_of_another_recovery_gives_way_to_a_link() {
+        let mut rd = Ramdisk { entries: Vec::new() };
+        rd.add("system/bin/recovery", 0o750, b"binary".to_vec()).unwrap();
+        rd.add("system/bin/unzip", 0o755, b"busybox".to_vec()).unwrap();
+        assert!(rd.link("system/bin/unzip", "recovery").is_err(), "link leaves a file alone");
+        rd.link_over("system/bin/unzip", "recovery").unwrap();
+        rd.link_over("system/bin/zstd", "recovery").unwrap();
+        for name in ["system/bin/unzip", "system/bin/zstd"] {
+            let e = rd.find(name).unwrap();
+            assert_eq!((e.mode, e.data.as_slice()), (S_IFLNK | LINK_MODE, b"recovery".as_slice()), "{name}");
+        }
+        rd.add("system/bin/7za", 0o755, Vec::new()).unwrap();
+        rd.entries.last_mut().unwrap().mode = S_IFDIR | 0o755;
+        assert!(rd.link_over("system/bin/7za", "recovery").is_err(), "a folder does not give way");
     }
 
     #[test]

@@ -81,6 +81,13 @@ pub struct Script {
     pub actions: Vec<Action>,
 }
 
+/// The words a service's options begin with, which a line outside any
+/// section can be left over from.
+const SERVICE_OPTIONS: [&str; 15] = [
+    "class", "user", "group", "capabilities", "socket", "setenv", "interface", "oneshot", "disabled", "override", "stdio_to_kmsg", "priority",
+    "writepid", "seclabel", "task_profiles",
+];
+
 /// The section a line belongs to.
 enum Section {
     None,
@@ -117,6 +124,11 @@ pub fn read(text: &str) -> Result<Script> {
                     option(program, &words).with_context(|| format!("line {number}, of the service {}", program.name))?;
                 }
                 Section::Action => script.actions.last_mut().expect("an on section has begun").commands.push(words),
+                // A phone may comment out a service's first line and leave
+                // its options behind, as Samsung's HDCP key provisioner's
+                // script does: they belong to nothing, and init passes over
+                // them. A line that is no option is still one nothing reads.
+                Section::None if SERVICE_OPTIONS.contains(&first.as_str()) => {}
                 Section::None => bail!("line {number}: {first} begins no section, and no section has begun"),
             },
         }
@@ -396,7 +408,9 @@ mod tests {
 
     #[test]
     fn a_line_outside_any_section_is_refused() {
-        assert!(read("user system\n").is_err());
+        let leftover = read("#service a /a\n    user system\n    group system\n").unwrap();
+        assert!(leftover.programs.is_empty(), "the options of a service whose first line is commented out are passed over");
+        assert!(read("frobnicate all\n").is_err(), "a line that is no option begins no section");
         assert!(read("service a\n").is_err(), "a service without its program");
         assert!(read("service a /a\n    user\n").is_err(), "a user line that names none");
         assert!(read("service a /a\n    setenv \"A\n").is_err(), "a quote left open");

@@ -153,6 +153,11 @@ pub struct Phone {
     pub programs: Vec<Program>,
     pub actions: Vec<Action>,
     pub services: Vec<Service>,
+    /// Whether the recovery the programs are started in is of another make
+    /// than the phone's own, TWRP's or OrangeFox's, whose own libraries are
+    /// older than the vendor partition's and whose init may run directories
+    /// of its own.
+    pub foreign: bool,
 }
 
 impl Phone {
@@ -168,7 +173,8 @@ impl Phone {
                 None => properties.remove(name),
             };
         }
-        let mut phone = Phone { partitions, properties, bundle: bundle.map(Path::to_path_buf), programs: Vec::new(), actions: Vec::new(), services: Vec::new() };
+        let mut phone =
+            Phone { partitions, properties, bundle: bundle.map(Path::to_path_buf), programs: Vec::new(), actions: Vec::new(), services: Vec::new(), foreign: false };
         phone.read_scripts()?;
         phone.read_descriptions()?;
         Ok(phone)

@@ -1,4 +1,4 @@
-use crate::waveform::{made, scaled, share, ticks, RATE, TICKS_RATE};
+use crate::waveform::{level, made, scaled, share, ticks, RATE, TICKS_RATE};
 use anyhow::{anyhow, ensure, Context, Result};
 use evdev::raw_stream::RawDevice;
 use skyward_config::Strength;
@@ -23,17 +23,31 @@ const TICKS_STRENGTH: f32 = 0.415;
 /// before taking them away brakes it.
 const TICKS_REST: Duration = Duration::from_millis(40);
 
-/// The vibration motor, played through the kernel's force-feedback
-/// events. The driver fills its queue with a made click's samples as the
-/// click is loaded, refilling it for no second play, and keeps the click
-/// playing after its samples have run out, even when told to stop, until
-/// the click is taken away. So each click is loaded as it is played, at the
-/// strength the slider gives, and taken away once it has played out.
+/// The vibration motor, played at the strength the slider gives.
 pub struct Haptics {
+    motor: Motor,
+    strength: Strength,
+}
+
+/// How the kernel plays the motor.
+enum Motor {
+    /// Through its force-feedback events.
+    Events(Events),
+    /// By a driver told how long to play, as Samsung's is, through the
+    /// files the configuration names.
+    Timed(skyward_config::Timed),
+}
+
+/// A motor played through the kernel's force-feedback events. The driver
+/// fills its queue with a made click's samples as the click is loaded,
+/// refilling it for no second play, and keeps the click playing after its
+/// samples have run out, even when told to stop, until the click is taken
+/// away. So each click is loaded as it is played, at the strength the
+/// slider gives, and taken away once it has played out.
+struct Events {
     dev: File,
     click: Click,
     ticks: Click,
-    strength: Strength,
     /// Whether the driver is given the strength in the samples it plays.
     scale_samples: bool,
     /// The click playing, by its slot and its count, until it is taken
@@ -56,21 +70,17 @@ impl Haptics {
     /// The force-feedback device and the configured click. Loading a click
     /// fills the driver's queue with what it plays, so the click is loaded
     /// only as it is played.
+    /// A motor told how long to play is played by its files alone.
     pub fn open(cfg: &skyward_config::Haptics) -> Result<Haptics> {
-        let (path, dev) = motor()?;
-        let hz = resonance(&cfg.resonance)?;
-        let click = match cfg.click {
-            Some(id) => {
-                eprintln!("haptics {}: clicks with waveform {id}, ticks made for a motor swinging at {hz} Hz", path.display());
-                Click::Kept(id)
+        let motor = match (&cfg.timed, &cfg.resonance) {
+            (Some(timed), _) => {
+                eprintln!("haptics {}: clicks of {} ms and ticks of {} ms", timed.duration, timed.click, timed.ticks);
+                Motor::Timed(timed.clone())
             }
-            None => {
-                eprintln!("haptics {}: clicks and ticks made for a motor swinging at {hz} Hz", path.display());
-                Click::Samples { data: made(hz), rate: RATE }
-            }
+            (None, Some(resonance)) => Motor::Events(Events::open(cfg, resonance)?),
+            (None, None) => anyhow::bail!("the configuration says neither how the motor is played nor how fast it swings"),
         };
-        let ticks = Click::Samples { data: ticks(hz), rate: TICKS_RATE };
-        Ok(Haptics { dev, click, ticks, strength: cfg.strength, scale_samples: cfg.scale_samples, playing: Arc::new(Mutex::new(None)), clicks: 0 })
+        Ok(Haptics { motor, strength: cfg.strength })
     }
 
     /// One short click at the strength the slider's `position` gives, after
@@ -87,6 +97,46 @@ impl Haptics {
 
     /// Play the ticks, or else the click, at `share` of its full strength,
     /// after taking away what still plays.
+    fn start(&mut self, ticks: bool, share: f32) -> Result<Duration> {
+        match &mut self.motor {
+            Motor::Events(events) => events.start(ticks, share),
+            Motor::Timed(timed) => play_timed(timed, if ticks { timed.ticks } else { timed.click }, share),
+        }
+    }
+}
+
+/// Play a timed motor for `ms` milliseconds at `share` of its full
+/// strength, where its driver takes a strength: the strength is written
+/// first, for the length written next starts it. The driver ends it on
+/// its own once the length has passed, and a length written while one
+/// plays takes its place.
+fn play_timed(timed: &skyward_config::Timed, ms: u32, share: f32) -> Result<Duration> {
+    if let (Some(file), Some(top)) = (&timed.intensity, timed.intensity_max) {
+        let level = level(share, top);
+        fs::write(file, level.to_string()).with_context(|| format!("write {level} to {file}"))?;
+    }
+    fs::write(&timed.duration, ms.to_string()).with_context(|| format!("write {ms} to {}", timed.duration))?;
+    Ok(Duration::from_millis(u64::from(ms)))
+}
+
+impl Events {
+    fn open(cfg: &skyward_config::Haptics, resonance_file: &str) -> Result<Events> {
+        let (path, dev) = motor()?;
+        let hz = resonance(resonance_file)?;
+        let click = match cfg.click {
+            Some(id) => {
+                eprintln!("haptics {}: clicks with waveform {id}, ticks made for a motor swinging at {hz} Hz", path.display());
+                Click::Kept(id)
+            }
+            None => {
+                eprintln!("haptics {}: clicks and ticks made for a motor swinging at {hz} Hz", path.display());
+                Click::Samples { data: made(hz), rate: RATE }
+            }
+        };
+        let ticks = Click::Samples { data: ticks(hz), rate: TICKS_RATE };
+        Ok(Events { dev, click, ticks, scale_samples: cfg.scale_samples, playing: Arc::new(Mutex::new(None)), clicks: 0 })
+    }
+
     fn start(&mut self, ticks: bool, share: f32) -> Result<Duration> {
         let mut playing = self.playing.lock().expect("no thread panics while it holds the click playing");
         if let Some((slot, _)) = playing.take() {

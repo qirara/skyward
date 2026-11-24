@@ -234,13 +234,16 @@ impl Plan {
             None => erase::discard(Path::new(&device)),
         }
         .map_err(failed(Step::Data))?;
-        let made_as = |entry: &Entry| self.reformat.clone().unwrap_or_else(|| entry.filesystem.clone());
+        // The filesystem the system asks for is the data partition's alone,
+        // as Android's own recovery takes it: the cache partition and
+        // /metadata are made afresh as the phone's table has them, which is
+        // how its init mounts them as it next starts.
         if let Some(cache) = &self.cache {
             tell(Event::At(Step::Cache));
-            remake_cache(cache, &made_as(cache)).map_err(failed(Step::Cache))?;
+            remake_cache(cache, &cache.filesystem).map_err(failed(Step::Cache))?;
         }
         tell(Event::At(Step::Metadata));
-        remake(&self.metadata, &made_as(&self.metadata)).map_err(failed(Step::Metadata))?;
+        remake(&self.metadata, &self.metadata.filesystem).map_err(failed(Step::Metadata))?;
         if !keep_memtag_mode {
             bcb::forget_memtag_mode(&bcb::misc()).map_err(failed(Step::Metadata))?;
         }
@@ -491,6 +494,20 @@ fn forget_cache_inodes(folders: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
+/// Make the folder a partition mounts at. A recovery whose /cache is a
+/// link into a folder of the data partition, as one of another make may
+/// keep it, has the folder made where the link points, which a data
+/// partition taken away leaves pointing at nothing; it mounts through the
+/// link as it did.
+fn make_mount_point(at: &Path) -> Result<()> {
+    let folder = match fs::read_link(at) {
+        Ok(target) if target.is_absolute() => target,
+        Ok(target) => at.parent().unwrap_or(Path::new("/")).join(target),
+        Err(_) => at.to_path_buf(),
+    };
+    fs::create_dir_all(&folder).with_context(|| format!("make {}", folder.display()))
+}
+
 /// The cache partition, where the phone has one.
 pub fn cache() -> Result<Option<Entry>> {
     Ok(fstab::read(CACHE)?.into_iter().next())
@@ -694,7 +711,7 @@ pub fn remake_cache(entry: &Entry, filesystem: &str) -> Result<()> {
     let kept = read_logs(&device, at)?;
     remake(entry, filesystem)?;
     let Some((folder, logs)) = kept else { return Ok(()) };
-    fs::create_dir_all(at).with_context(|| format!("make {}", at.display()))?;
+    make_mount_point(at)?;
     // The table's options are for the filesystem it names.
     let options: &[String] = if filesystem == entry.filesystem { &entry.options } else { &[] };
     mount::mount(&device, at, filesystem, options)?;
@@ -721,7 +738,7 @@ fn read_logs(device: &Path, at: &Path) -> Result<Option<(Look, Vec<Log>)>> {
     if mount::is_mount_point(at)? {
         mount::umount(at)?;
     }
-    fs::create_dir_all(at).with_context(|| format!("make {}", at.display()))?;
+    make_mount_point(at)?;
     if let Err(e) = mount::mount_ro(device, at) {
         skyward_sys::kmsg(&format!("{} does not mount, so it keeps no logs: {e:#}", device.display()))?;
         return Ok(None);

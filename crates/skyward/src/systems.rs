@@ -51,7 +51,7 @@ pub fn next_slot() -> Result<Slot> {
 /// installed, and what the boot partitions hold, which are those of the
 /// slot the phone started from where nothing is kept of them.
 fn read(version_prop: &str) -> Result<Overview> {
-    let current = skyward_vab::current_slot()?.context("not an A/B phone")?;
+    let current = skyward_vab::current_slot()?.context("a phone without slots holds one system, and no second one")?;
     let props = skyward_info::installed_props(current)?;
     let state = install::state()?;
     let changed = match state.system {

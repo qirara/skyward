@@ -242,10 +242,22 @@ impl Inputs {
             eprintln!("input {}: {:?} direct={direct} multitouch={mt} keys={keys}", path.display(), dev.name().unwrap_or("?"));
             if direct && mt && self.panel.is_none() {
                 self.wakeful.add(dev.as_raw_fd())?;
-                self.panel = Some(Panel::new(path, dev)?);
-                for w in &self.touch_writes {
-                    fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path))?;
-                    skyward_sys::kmsg(&format!("wrote {} to {} for the touchscreen", w.value, w.path))?;
+                match Panel::new(path.clone(), dev) {
+                    Ok(panel) => {
+                        self.panel = Some(panel);
+                        for w in &self.touch_writes {
+                            fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path))?;
+                            skyward_sys::kmsg(&format!("wrote {} to {} for the touchscreen", w.value, w.path))?;
+                        }
+                    }
+                    // A panel still starting may not answer what it is yet:
+                    // it is left unseen, and taken in at the next change
+                    // under /dev/input. The device closed with the error
+                    // leaves the epoll set by itself.
+                    Err(e) => {
+                        self.seen.remove(&path);
+                        skyward_sys::kmsg(&format!("input {}: not taken as the panel yet: {e:#}", path.display()))?;
+                    }
                 }
             } else if keys {
                 set_nonblocking(dev.as_raw_fd()).context("make buttons non-blocking")?;

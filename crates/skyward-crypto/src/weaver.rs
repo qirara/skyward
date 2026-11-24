@@ -15,8 +15,18 @@ use skyward_binder::status;
 pub const SERVICE: &str = "android.hardware.weaver.IWeaver/default";
 const INTERFACE: &str = "android.hardware.weaver.IWeaver";
 
+/// Its methods, numbered in the order its interface declares them:
+/// getConfig, read, write.
 const GET_CONFIG: u32 = 1;
 const READ: u32 = 2;
+
+/// The weaver of the older kind, as it registers with the directory of the
+/// phone's hardware services, as Samsung's does. Its interface declares
+/// getConfig, write and read, in that order, so its read is the third.
+const HIDL_SERVICE: &str = "android.hardware.weaver@1.0::IWeaver";
+const HIDL_INSTANCE: &str = "default";
+const HIDL_GET_CONFIG: u32 = 1;
+const HIDL_READ: u32 = 3;
 
 /// How a read went, as the weaver's second version says it in its answer.
 const READ_OK: i32 = 0;
@@ -96,38 +106,118 @@ fn value(read: &mut Reader) -> Result<Vec<u8>> {
     }
 }
 
-/// The phone's weaver, as this program talks to it.
+/// The phone's weaver, as this program talks to it: one of the newer kind,
+/// or of the older, whose calls and answers carry their values as the
+/// hardware services do.
 #[cfg(target_os = "android")]
 pub struct Weaver<'a> {
     device: skyward_binder::driver::Handle<'a>,
+    older: bool,
 }
+
+/// How long a weaver may take to come up. One whose slots the secure world
+/// keeps comes up only once the data partition is mounted, and is started
+/// again until then; reading a slot is what the partition is opened for.
+#[cfg(target_os = "android")]
+const COMING_UP: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[cfg(target_os = "android")]
 impl<'a> Weaver<'a> {
-    /// Reach the running weaver, or say that none is.
-    pub fn open(binder: &'a skyward_binder::driver::Binder) -> Result<Weaver<'a>> {
-        let device = skyward_binder::service::find(binder, SERVICE)?
-            .with_context(|| format!("{SERVICE} is not running; the phone's weaver has to be started first"))?;
-        Ok(Weaver { device })
+    /// Reach the running weaver: of the newer kind through `binder`, or of
+    /// the older through `hardware`, waiting a while for one coming up; or
+    /// say that none is.
+    pub fn open(binder: &'a skyward_binder::driver::Binder, hardware: &'a skyward_binder::driver::Binder) -> Result<Weaver<'a>> {
+        let until = std::time::Instant::now() + COMING_UP;
+        loop {
+            if let Some(device) = skyward_binder::service::find(binder, SERVICE)? {
+                return Ok(Weaver { device, older: false });
+            }
+            if let Some(device) = skyward_binder::hidl::find(hardware, HIDL_SERVICE, HIDL_INSTANCE)? {
+                return Ok(Weaver { device, older: true });
+            }
+            if std::time::Instant::now() >= until {
+                bail!("{SERVICE} is not running, nor {HIDL_SERVICE}/{HIDL_INSTANCE}; the phone's weaver has to be started first");
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
     }
 
     pub fn config(&self) -> Result<Config> {
-        let reply = self.device.transact(GET_CONFIG, &ask_config()).context("ask the weaver about itself")?;
-        config(&mut reply.read())
+        if !self.older {
+            let reply = self.device.transact(GET_CONFIG, &ask_config()).context("ask the weaver about itself")?;
+            return config(&mut reply.read());
+        }
+        use skyward_binder::hidl::{Answer, Message};
+        let reply = self.device.transact(HIDL_GET_CONFIG, &Message::call(HIDL_SERVICE)).context("ask the weaver about itself")?;
+        let mut read = Answer::new(reply.bytes());
+        read.status().context("ask the weaver about itself")?;
+        let said = read.i32().context("read how the weaver answered")?;
+        anyhow::ensure!(said == 0, "the weaver failed to say what it is ({said})");
+        // How many slots, how long the keys, and how long the values.
+        let config = read.pointed().context("read what the weaver says of itself")?;
+        anyhow::ensure!(config.len() >= 12, "the weaver said what it is in {} bytes", config.len());
+        let field = |at: usize| u32::from_le_bytes(config[at..at + 4].try_into().expect("four bytes"));
+        Ok(Config { slots: field(0), key_bytes: field(4) as usize, value_bytes: field(8) as usize })
     }
 
     /// The value `slot` keeps behind `key`. A wrong key is counted against
     /// the slot by the secure element, so this is not something to call
     /// twice over on a guess.
     pub fn read(&self, slot: u32, key: &[u8]) -> Result<Vec<u8>> {
-        let reply = self.device.transact(READ, &ask_value(slot, key)).with_context(|| format!("read slot {slot} of the weaver"))?;
-        value(&mut reply.read())
+        if !self.older {
+            let reply = self.device.transact(READ, &ask_value(slot, key)).with_context(|| format!("read slot {slot} of the weaver"))?;
+            return value(&mut reply.read());
+        }
+        use skyward_binder::hidl::{Answer, Message};
+        let mut call = Message::call(HIDL_SERVICE);
+        call.u32(slot);
+        call.bytes(key);
+        let reply = self.device.transact(HIDL_READ, &call).with_context(|| format!("read slot {slot} of the weaver"))?;
+        let mut read = Answer::new(reply.bytes());
+        read.status().with_context(|| format!("read slot {slot} of the weaver"))?;
+        let said = read.i32().context("read how the read went")?;
+        // How long to hold off, in milliseconds, then the value, as the
+        // structure the driver moved into this program's room holds them:
+        // the value's frame points at its bytes, which the driver moved
+        // here too.
+        let response = read.opt_pointed().context("read what the weaver answered")?.unwrap_or_default();
+        let (wait, value) = match response.len() >= 24 {
+            true => {
+                let wait = u32::from_le_bytes(response[0..4].try_into().expect("four bytes"));
+                let at = u64::from_le_bytes(response[8..16].try_into().expect("eight bytes"));
+                let length = u32::from_le_bytes(response[16..20].try_into().expect("four bytes")) as usize;
+                let value = match (at, length) {
+                    (_, 0) | (0, _) => Vec::new(),
+                    _ => unsafe { std::slice::from_raw_parts(at as *const u8, length) }.to_vec(),
+                };
+                (wait, value)
+            }
+            false => (0, Vec::new()),
+        };
+        let seconds = u64::from(wait).div_ceil(1000);
+        match said {
+            READ_OK => Ok(value),
+            READ_THROTTLE => bail!("the secure element is holding off further tries for another {seconds} seconds"),
+            READ_INCORRECT_KEY if wait > 0 => {
+                bail!("the secure element does not recognise that credential, and holds off further tries for another {seconds} seconds")
+            }
+            READ_INCORRECT_KEY => bail!("the secure element does not recognise that credential"),
+            _ => bail!("the weaver failed to read the slot"),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_kind_reads_by_the_number_its_interface_gives_read() {
+        // The newer interface declares read before write, the older after
+        // it: the third method of the newer kind writes a slot.
+        assert_eq!((GET_CONFIG, READ), (1, 2));
+        assert_eq!((HIDL_GET_CONFIG, HIDL_READ), (1, 3));
+    }
 
     /// A reply that went through, carrying one structure: that it is there,
     /// how long it is, then its fields.

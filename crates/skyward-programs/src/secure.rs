@@ -11,8 +11,10 @@ use skyward_config::Service;
 use std::path::Path;
 
 /// The key service, and the packages whose services it serves besides: it
-/// is one program behind them all.
+/// is one program behind them all. A vendor built for Android 11 or before
+/// has the older kind instead, Keymaster 4, as Samsung's for the S21 has.
 const KEYS: &str = "android.hardware.security.keymint.IKeyMintDevice/default";
+const OLDER_KEYS: (&str, &str) = ("android.hardware.keymaster", "IKeymasterDevice");
 const KEY_PACKAGES: [&str; 3] = ["android.hardware.security.keymint", "android.hardware.security.secureclock", "android.hardware.security.sharedsecret"];
 
 /// The credential service and the boot control, each by its package and
@@ -22,8 +24,10 @@ const CREDENTIALS: (&str, &str) = ("android.hardware.gatekeeper", "IGatekeeper")
 const BOOT: (&str, &str) = ("android.hardware.boot", "IBootControl");
 
 /// The weaver, on phones that keep a part of each user's secret in a
-/// secure element.
+/// secure element, by its name or its package and interface: a phone has
+/// it as a service of the newer kind or of the older.
 const WEAVER: &str = "android.hardware.weaver.IWeaver/default";
+const WEAVER_OF: (&str, &str) = ("android.hardware.weaver", "IWeaver");
 
 /// The service of one secure element, by its package and its interface,
 /// and what the ones built into the phone are named after, as opposed to
@@ -45,6 +49,10 @@ enum Through {
     ElementService,
     /// A service of the secure element's maker's own, by its interface.
     Own(&'static str),
+    /// Nothing Android describes: the slots are kept by the secure world,
+    /// which the weaver's program reaches on its own, as Samsung's Hermes
+    /// daemon does.
+    SecureWorld,
 }
 
 /// The driver of the chip a secure element is in: the kernel module it is,
@@ -64,11 +72,12 @@ const NXP_CONTROLLER: Driver = Driver { module: "nxp-nci", node: "/dev/nq-nci" }
 /// longer endings first, with the driver its secure element takes where a
 /// recovery has to load one: Thales' and NXP's go through Android's secure
 /// element service, and Goodix's, whose program is named after no maker,
-/// through Goodix's own.
-const WEAVERS: [(&str, Through, Option<Driver>); 3] = [
+/// through Goodix's own, and Samsung's through its own secure world.
+const WEAVERS: [(&str, Through, Option<Driver>); 4] = [
     (".thales", Through::ElementService, None),
     (".nxp-qti", Through::ElementService, Some(NXP_CONTROLLER)),
     ("weaver-service", Through::Own("vendor.goodix.hardware.secure_element_aidl.IGdxEse"), None),
+    ("hermesd", Through::SecureWorld, None),
 ];
 
 /// Qualcomm's programs between Android and the secure world, by the names
@@ -118,6 +127,31 @@ pub(crate) fn libraries_of(path: &str, bundle: Option<&Path>) -> Vec<String> {
     let bundle = bundle.map(|dir| dir.to_string_lossy().into_owned());
     own.iter().map(|l| l.to_string()).chain(bundle).chain(shared.iter().map(|l| l.to_string())).collect()
 }
+
+/// The folders a hardware service of the older kind finds its libraries
+/// in, on a recovery of another make: those of its partition first, then
+/// the bundle the partitions were built against, then the recovery's own
+/// and the installed system's. Such a recovery's own libraries are older
+/// than the vendor partition the service was built for, and loaded first
+/// they take the place of what the service needs.
+fn hardware_libraries_of(path: &str, bundle: Option<&Path>) -> Vec<String> {
+    let own: &[&str] = match path.split('/').nth(1) {
+        Some("odm") => &["/odm/lib64", "/vendor/lib64", "/vendor/lib64/hw"],
+        _ => &["/vendor/lib64", "/vendor/lib64/hw"],
+    };
+    let bundle = bundle.map(|dir| dir.to_string_lossy().into_owned());
+    own.iter()
+        .map(|l| l.to_string())
+        .chain(bundle)
+        .chain(std::iter::once("/system/lib64".to_string()))
+        .chain(SHARED_LIBRARIES.iter().map(|l| l.to_string()))
+        .collect()
+}
+
+/// The recovery's own C++ runtime, which a hardware service started on a
+/// recovery of another make loads ahead of the bundle's: what it logs
+/// through is the recovery's, built against this runtime.
+const RECOVERY_CXX: &str = "/system/lib64/libc++.so";
 
 /// A program to start, with what init gives it that a recovery has to
 /// give it too.
@@ -179,37 +213,59 @@ pub fn steps(phone: &Phone) -> Result<Vec<Step>> {
         }
     }
 
-    ensure!(described(phone, Kind::Aidl, KEYS).is_some(), "the phone describes no {KEYS}");
-    let keys = behind(phone, "the key service", KEYS, |file| file.contains("keymint") && !file.contains("strongbox"))?;
-    let with_keys = |d: &Described| d.instance == INSTANCE && KEY_PACKAGES.contains(&d.package.as_str());
-    start(&mut out, started(phone, keys, Ready::Service(KEYS.into()), besides(phone, keys, KEYS, with_keys)));
-
+    // The key service is of the newer kind where the phone describes one,
+    // and of the older otherwise, which Android's own keystore reaches over
+    // the driver the hardware services talk on.
+    let (keys, keys_kind) = match described(phone, Kind::Aidl, KEYS) {
+        Some(_) => (KEYS.to_string(), Kind::Aidl),
+        None => offered(phone, OLDER_KEYS).with_context(|| format!("the phone describes no {KEYS}, nor a key service of the older kind"))?,
+    };
     let (credentials, credentials_kind) = offered(phone, CREDENTIALS).context("the phone describes no credential service")?;
-    let (boot, boot_kind) = offered(phone, BOOT).context("the phone describes no boot control")?;
-    if credentials_kind == Kind::Hidl || boot_kind == Kind::Hidl {
-        let directory = phone
-            .programs
-            .iter()
-            .find(|p| p.name == HARDWARE_DIRECTORY && phone.carries(p))
-            .context("the phone has hardware services of the older kind, and no directory for them among the programs its scripts name")?;
-        start(&mut out, started(phone, directory, Ready::Property(HARDWARE_DIRECTORY_READY), Vec::new()));
-    }
+    // A phone without slots has no boot control, having no slot to switch.
+    let boot = offered(phone, BOOT);
     let ready = |name: String, kind: Kind| match kind {
         Kind::Aidl => Ready::Service(name),
         Kind::Hidl => Ready::HardwareService(name),
     };
+    // The directory for hardware services comes before the first of them,
+    // which is the key service where that is of the older kind.
+    let directory = |out: &mut Vec<Step>| -> Result<()> {
+        match phone.programs.iter().find(|p| p.name == HARDWARE_DIRECTORY && phone.carries(p)) {
+            Some(directory) => start(out, started(phone, directory, Ready::Property(HARDWARE_DIRECTORY_READY), Vec::new())),
+            // A recovery of another make may run a directory of its own,
+            // which the services register with as they would on the phone.
+            None if phone.foreign => {}
+            None => bail!("the phone has hardware services of the older kind, and no directory for them among the programs its scripts name"),
+        }
+        Ok(())
+    };
+    if keys_kind == Kind::Hidl {
+        directory(&mut out)?;
+    }
+    let program = behind(phone, "the key service", &keys, |file| (file.contains("keymint") || file.contains("keymaster")) && !file.contains("strongbox"))?;
+    let registers = match keys_kind {
+        Kind::Aidl => besides(phone, program, &keys, |d: &Described| d.instance == INSTANCE && KEY_PACKAGES.contains(&d.package.as_str())),
+        Kind::Hidl => Vec::new(),
+    };
+    start(&mut out, started(phone, program, ready(keys, keys_kind), registers));
+    if keys_kind == Kind::Aidl && (credentials_kind == Kind::Hidl || boot.as_ref().is_some_and(|(_, kind)| *kind == Kind::Hidl)) {
+        directory(&mut out)?;
+    }
+
     let alone = |_: &Described| false;
     let program = behind(phone, "the credential service", &credentials, |file| file.contains("gatekeeper"))?;
     let registers = besides(phone, program, &credentials, alone);
     start(&mut out, started(phone, program, ready(credentials, credentials_kind), registers));
 
-    if described(phone, Kind::Aidl, WEAVER).is_some() {
-        out.extend(weaver(phone)?);
+    if let Some((name, kind)) = offered(phone, WEAVER_OF) {
+        out.extend(weaver(phone, &name, kind)?);
     }
 
-    let program = behind(phone, "the boot control", &boot, |file| file.starts_with(BOOT.0))?;
-    let registers = besides(phone, program, &boot, alone);
-    start(&mut out, started(phone, program, ready(boot, boot_kind), registers));
+    if let Some((boot, boot_kind)) = boot {
+        let program = behind(phone, "the boot control", &boot, |file| file.starts_with(BOOT.0))?;
+        let registers = besides(phone, program, &boot, alone);
+        start(&mut out, started(phone, program, ready(boot, boot_kind), registers));
+    }
     Ok(out)
 }
 
@@ -254,11 +310,16 @@ pub fn programs(steps: &[Step]) -> Vec<&Started> {
 /// What starting the weaver takes: the driver of the chip its secure
 /// element is in, what it reaches the secure element through, and then the
 /// weaver itself.
-fn weaver(phone: &Phone) -> Result<Vec<Step>> {
+fn weaver(phone: &Phone, name: &str, kind: Kind) -> Result<Vec<Step>> {
     let mut out = Vec::new();
-    let program = behind(phone, "the weaver", WEAVER, |file| file.contains("weaver-service"))?;
+    let known = |file: &str| file.contains("weaver-service") || WEAVERS.iter().any(|(ending, ..)| file.ends_with(ending));
+    // A phone whose scripts run no weaver of a make known here keeps its
+    // slots to programs of its own, as Qualcomm's older phones do, and the
+    // recovery starts none: a user bound to the weaver is opened as far as
+    // the phone lets one be.
+    let Ok(program) = behind(phone, "the weaver", name, known) else { return Ok(out) };
     let file = file_name(program);
-    let (_, through, driver) = WEAVERS.iter().find(|(ending, ..)| file.ends_with(ending)).with_context(|| format!("{} is a weaver of a make the recovery does not know", program.path))?;
+    let Some((_, through, driver)) = WEAVERS.iter().find(|(ending, ..)| file.ends_with(ending)) else { return Ok(out) };
     out.extend(driver.map(Step::Drive));
     match through {
         Through::Own(interface) => {
@@ -287,9 +348,29 @@ fn weaver(phone: &Phone) -> Result<Vec<Step>> {
             }
             out.push(Step::ServeElements);
         }
+        Through::SecureWorld => {}
     }
-    let mut weaver = started(phone, program, Ready::Service(WEAVER.into()), besides(phone, program, WEAVER, |_| false));
+    // One whose slots the secure world keeps comes up only once the data
+    // partition is mounted, for the state it keeps beside the phone's own:
+    // it is started and left to start again until it does, and whoever
+    // reads a slot waits for it then.
+    let ready = match (kind, through) {
+        (Kind::Aidl, _) => Ready::Service(name.to_string()),
+        (Kind::Hidl, Through::SecureWorld) => Ready::Nothing,
+        (Kind::Hidl, _) => Ready::HardwareService(name.to_string()),
+    };
+    let registers = match kind {
+        Kind::Aidl => besides(phone, program, WEAVER, |_| false),
+        Kind::Hidl => Vec::new(),
+    };
+    let mut weaver = started(phone, program, ready, registers);
     weaver.anew = *through == Through::ElementService;
+    // Samsung's runs on the installed system's C++ runtime, which the
+    // libraries beside it were built against; a recovery's own is older
+    // and lacks what they ask for.
+    if *through == Through::SecureWorld {
+        preload(&mut weaver.environment, &format!("{}/libc++.so", SHARED_LIBRARIES[0]));
+    }
     out.push(Step::Start(Box::new(weaver)));
     Ok(out)
 }
@@ -404,10 +485,17 @@ fn started(phone: &Phone, program: &Program, ready: Ready, registers: Vec<String
         Ready::Service(name) => (None, Some(name), None),
         Ready::HardwareService(name) => (None, None, Some(name)),
     };
+    // On a recovery of another make, a hardware service of the older kind
+    // runs on its own partition's libraries before the recovery's.
+    let foreign_hardware = phone.foreign && ready_hardware_service.is_some();
+    let libraries = match foreign_hardware {
+        true => hardware_libraries_of(&program.path, phone.bundle.as_deref()),
+        false => libraries_of(&program.path, phone.bundle.as_deref()),
+    };
     let service = Service {
         path: phone.started_from(&program.path),
         args: program.args.clone(),
-        libraries: libraries_of(&program.path, phone.bundle.as_deref()),
+        libraries,
         oneshot: false,
         ready_property,
         ready_service,
@@ -418,5 +506,15 @@ fn started(phone: &Phone, program: &Program, ready: Ready, registers: Vec<String
         groups: program.groups.clone(),
         capabilities: program.capabilities.clone().unwrap_or_default(),
     };
-    Started { service, sockets: program.sockets.clone(), environment: program.environment.clone(), anew: false }
+    let mut environment = program.environment.clone();
+    if foreign_hardware {
+        preload(&mut environment, RECOVERY_CXX);
+    }
+    Started { service, sockets: program.sockets.clone(), environment, anew: false }
+}
+
+/// Have the program load `library` ahead of everything it asks for.
+fn preload(environment: &mut Vec<(String, String)>, library: &str) {
+    environment.retain(|(name, _)| name != "LD_PRELOAD");
+    environment.push(("LD_PRELOAD".to_string(), library.to_string()));
 }

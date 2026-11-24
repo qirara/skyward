@@ -12,6 +12,30 @@ pub const MOUNT: &str = "/skyward/persist";
 /// milliseconds as a little-endian u64.
 pub const OFFSET: &str = "time/ats_2";
 
+/// The folder the daemon keeps its offsets in, one file for each base it
+/// keeps time against: Samsung's keeps the time of day in another of them.
+pub const OFFSETS: &str = "time";
+
+/// The offset of the time of day among the copies the daemon left in
+/// [`OFFSETS`], each named and with when it was last written: the one
+/// [`OFFSET`] names where it holds one, and otherwise the one written
+/// last that holds an offset at all.
+pub fn chosen(copies: &[(String, std::time::SystemTime, Vec<u8>)]) -> Result<u64> {
+    let named = OFFSET.rsplit('/').next().expect("the offset is in a folder");
+    if let Some((_, _, bytes)) = copies.iter().find(|(name, ..)| name == named)
+        && let Ok(ms) = offset(bytes)
+    {
+        return Ok(ms);
+    }
+    copies
+        .iter()
+        .filter(|(name, ..)| name.starts_with("ats_"))
+        .filter_map(|(_, written, bytes)| offset(bytes).ok().map(|ms| (written, ms)))
+        .max_by_key(|(written, _)| **written)
+        .map(|(_, ms)| ms)
+        .ok_or_else(|| anyhow!("the time daemon has stored no offset yet"))
+}
+
 /// The real-time clock's count of seconds. On Qualcomm phones it runs from
 /// whenever the PMIC last lost power, and Android never sets it.
 pub const RTC: &str = "/sys/class/rtc/rtc0/since_epoch";
@@ -42,18 +66,29 @@ pub fn set_from_rtc() -> Result<u64> {
     // An earlier run of the recovery service may have left persist mounted
     // where the phone's own programs use it, writable, and then it cannot
     // be mounted read-only besides.
+    let copies = |at: &Path| -> Result<Vec<(String, std::time::SystemTime, Vec<u8>)>> {
+        let dir = at.join(OFFSETS);
+        let mut out = Vec::new();
+        for entry in fs::read_dir(&dir).with_context(|| format!("read persist's {OFFSETS}"))? {
+            let entry = entry.with_context(|| format!("read persist's {OFFSETS}"))?;
+            let written = entry.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            let Ok(bytes) = fs::read(entry.path()) else { continue };
+            out.push((entry.file_name().to_string_lossy().into_owned(), written, bytes));
+        }
+        Ok(out)
+    };
     let read = match skyward_block::mount::points_of(skyward_block::devnum(PERSIST)?)?.first() {
-        Some(at) => fs::read(at.join(OFFSET)).with_context(|| format!("read persist's {OFFSET}")),
+        Some(at) => copies(at),
         None => {
             let mount = Path::new(MOUNT);
             fs::create_dir_all(mount).with_context(|| format!("make {}", mount.display()))?;
             skyward_block::mount::mount_ro(Path::new(PERSIST), mount)?;
-            let read = fs::read(mount.join(OFFSET)).with_context(|| format!("read persist's {OFFSET}"));
+            let read = copies(mount);
             skyward_block::mount::umount(mount)?;
             read
         }
     };
-    let offset_ms = offset(&read?)?;
+    let offset_ms = chosen(&read?)?;
     let rtc = fs::read_to_string(RTC).with_context(|| format!("read {RTC}"))?;
     let rtc_s: u64 = rtc.trim().parse().with_context(|| format!("{RTC} holds {rtc:?}"))?;
     let now = wall(rtc_s, offset_ms);
@@ -67,6 +102,19 @@ pub fn set_from_rtc() -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_time_of_day_s_copy_is_taken_where_there_is_one_and_the_newest_otherwise() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let at = |s: u64| UNIX_EPOCH + Duration::from_secs(s);
+        let copy = |name: &str, written, ms: u64| (name.to_string(), at(written), ms.to_le_bytes().to_vec());
+        let xiaomi = [copy("ats_1", 30, 5), copy("ats_2", 10, 1_791_968_239_417)];
+        assert_eq!(chosen(&xiaomi).unwrap(), 1_791_968_239_417, "ats_2, however old");
+        let samsung = [copy("ats_1", 10, 1_700_000_000_000), copy("ats_15", 20, 1_791_968_239_417), copy("ats_2", 30, 0)];
+        assert_eq!(chosen(&samsung).unwrap(), 1_791_968_239_417, "ats_2 holds nothing, and ats_15 was written last of those that hold one");
+        assert!(chosen(&[copy("ats_2", 1, 0), copy("other", 2, 7)]).is_err(), "no copy holds an offset");
+        assert!(chosen(&[]).is_err());
+    }
 
     #[test]
     fn the_offset_and_the_rtc_make_the_time() {

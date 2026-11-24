@@ -10,7 +10,10 @@ use std::time::{Duration, Instant};
 
 /// Where a phone keeps the bundles of shared libraries its own partitions
 /// were built against.
-const BUNDLE_DIRS: [&str; 4] = ["/mnt/system_ext/apex", "/mnt/system/system/apex", "/mnt/product/apex", "/vendor/apex"];
+/// A phone whose system_ext is a folder of its system partition, as
+/// Samsung's is, keeps that one's bundles under the system partition.
+const BUNDLE_DIRS: [&str; 6] =
+    ["/mnt/system_ext/apex", "/mnt/system/system/system_ext/apex", "/mnt/system/system/apex", "/mnt/product/apex", "/vendor/apex", "/odm/apex"];
 
 /// The file inside a bundle that holds its filesystem. It is stored whole,
 /// so the bundle can be opened where it lies.
@@ -34,6 +37,55 @@ const PHONE_DESCRIPTION: &str = "phone.xml";
 /// The name init knows the service directory by, and the program it runs.
 const DIRECTORY_SERVICE: &str = "servicemanager";
 const DIRECTORY_PROGRAM: &str = "/system/bin/servicemanager";
+
+/// The name init knows the directory for hardware services by.
+pub const HARDWARE_DIRECTORY_SERVICE: &str = "hwservicemanager";
+
+/// Whether init runs the service directory, as a stock recovery's does: it
+/// says how each of its services stands. A recovery of another make's init
+/// may know none, the recovery then starting the directory itself.
+fn init_runs_directory() -> bool {
+    skyward_sys::prop(&format!("init.svc.{DIRECTORY_SERVICE}")).is_some()
+}
+
+/// Start the recovery's own service directory where init knows none, and
+/// leave it running; it is waited on so that it leaves nothing behind.
+fn spawn_directory() -> Result<()> {
+    let mut child = std::process::Command::new(DIRECTORY_PROGRAM)
+        .current_dir("/")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("start {DIRECTORY_PROGRAM}"))?;
+    std::thread::spawn(move || {
+        let ended = child.wait();
+        let _ = skyward_sys::kmsg(&format!("{DIRECTORY_PROGRAM}, started by the recovery, ended: {ended:?}"));
+    });
+    Ok(())
+}
+
+/// Have the service directory answer before anything is looked up in it:
+/// started where it does not run, by init where init knows it and by the
+/// recovery where it does not, as on a recovery of another make; and the
+/// mark its copy of libbinder reads settled, which on such a recovery may
+/// be the installed system's. `foreign` says the recovery is of another
+/// make, whose mark is worth telling of.
+pub fn directory(foreign: bool) -> Result<()> {
+    if crate::services::running(DIRECTORY_PROGRAM).is_none() {
+        match init_runs_directory() {
+            true => skyward_sys::set_prop("ctl.start", DIRECTORY_SERVICE)?,
+            false => spawn_directory()?,
+        }
+        skyward_sys::kmsg("the service directory was not running, and is started")?;
+    }
+    let binder = skyward_binder::driver::Binder::open()?;
+    let mark = skyward_binder::service::settle_mark(&binder)?;
+    if foreign || mark != skyward_binder::parcel::RECOVERY {
+        skyward_sys::kmsg(&format!("the service directory reads the mark {:?}", String::from_utf8_lossy(&mark.to_be_bytes())))?;
+    }
+    Ok(())
+}
 
 /// Where init says which process each of its services runs as, one
 /// property per service, the service's name following this.
@@ -158,9 +210,35 @@ fn describe_hardware(wanted: &[String]) -> Result<String> {
 /// Open the bundle of libraries the phone's own partitions were built
 /// against and give the directory they are in. A phone whose partitions
 /// need no bundle has none to open.
+///
+/// The running system names the build of the vendor interface in a
+/// property; a recovery of another make sets none, and where it is not
+/// set, the newest bundle of the interface the partitions carry is the one
+/// opened, which the vendor partition was built against where it carries
+/// one at all.
 pub fn libraries() -> Result<Option<PathBuf>> {
-    let Some(version) = skyward_sys::prop(VENDOR_INTERFACE) else { return Ok(None) };
+    let version = match skyward_sys::prop(VENDOR_INTERFACE).filter(|v| !v.trim().is_empty()) {
+        Some(version) => version.trim().to_string(),
+        None => match newest_interface_bundle() {
+            Some(version) => version.to_string(),
+            None => return Ok(None),
+        },
+    };
     Ok(bundle(&format!("com.android.vndk.v{version}"))?.map(|at| at.join(BUNDLE_LIBS)))
+}
+
+/// The newest build of the vendor interface whose bundle the partitions
+/// carry, by the number its name ends in.
+fn newest_interface_bundle() -> Option<u32> {
+    BUNDLE_DIRS
+        .iter()
+        .filter_map(|dir| fs::read_dir(dir).ok())
+        .flat_map(|entries| entries.flatten())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.strip_prefix("com.android.vndk.v")?.strip_suffix(".apex")?.parse::<u32>().ok()
+        })
+        .max()
 }
 
 /// Open the bundle of this name where it lies, and give where it is. A
@@ -249,7 +327,16 @@ pub fn publish_descriptions(wanted: &[String]) -> Result<()> {
         // whenever its directory restarts.
         let registered = registered()?;
         let was = crate::services::running(DIRECTORY_PROGRAM);
-        skyward_sys::set_prop("ctl.restart", DIRECTORY_SERVICE).context("have the service directory start again")?;
+        match init_runs_directory() {
+            true => skyward_sys::set_prop("ctl.restart", DIRECTORY_SERVICE).context("have the service directory start again")?,
+            // One the recovery started itself is ended, and started again.
+            false => {
+                if let Some(pid) = was {
+                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                }
+                spawn_directory()?;
+            }
+        }
         answering_again(was)?;
         register_again(&registered)?;
     }

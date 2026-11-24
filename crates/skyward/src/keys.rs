@@ -4,7 +4,7 @@
 //! them, so no phone is told of them by hand, and a system that names them
 //! otherwise after an update is followed as it is.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use skyward_config::Service;
 use skyward_programs::naming::{self, Does};
 use skyward_programs::phone::{self, Partition, Phone, PARTITIONS};
@@ -34,14 +34,25 @@ pub struct Found {
 /// `libraries` is where the libraries the phone's partitions were built
 /// against are opened, on a phone that carries them as a bundle of their
 /// own: each of its programs is given the folder among its own.
-pub fn found(slot: skyward_vab::Slot, libraries: Option<&Path>) -> Result<Found> {
+///
+/// `foreign` is whether the recovery is of another make than the phone's
+/// own, as `[base]` says, which changes how its hardware services start.
+pub fn found(slot: skyward_vab::Slot, libraries: Option<&Path>, foreign: bool) -> Result<Found> {
     let mut phone = read(slot, libraries)?;
     let unnamed = naming::steps(&phone)?;
     if !unnamed.is_empty() {
         name(&unnamed)?;
         phone = read(slot, libraries)?;
     }
+    phone.foreign = foreign;
     Ok(Found { described: phone.told_of(), steps: secure::steps(&phone) })
+}
+
+/// Where the installed system keeps a partition's files where the phone
+/// has no such partition, as a phone whose system_ext is a folder of its
+/// system partition keeps that one's.
+fn folded(name: &str) -> Option<PathBuf> {
+    (name == "system_ext").then(|| skyward_vab::mount_point("system").join("system/system_ext"))
 }
 
 /// The phone as the partitions of the slot's installed system describe it,
@@ -54,9 +65,15 @@ fn read(slot: skyward_vab::Slot, libraries: Option<&Path>) -> Result<Phone> {
     let mounted = skyward_vab::mounted_partitions(slot)?;
     let mut partitions = Vec::new();
     for name in PARTITIONS {
-        let named = format!("{name}{}", slot.suffix());
-        let partition = mounted.iter().find(|m| m.partition == named).with_context(|| format!("{named} is not mounted"))?;
-        partitions.push(Partition::mounted(name, &partition.mount_point));
+        let named = skyward_vab::partition_name(name, slot)?;
+        match (mounted.iter().find(|m| m.partition == named), folded(name)) {
+            (Some(partition), _) => partitions.push(Partition::mounted(name, &partition.mount_point)),
+            (None, Some(dir)) if dir.is_dir() => partitions.push(Partition::mounted(name, dir)),
+            // The vendor partition holds the programs of the phone's keys;
+            // a phone may have no other of these, as Samsung's have no odm.
+            (None, _) if name == "vendor" => bail!("{named} is not mounted"),
+            (None, _) => skyward_sys::kmsg(&format!("{named} is not mounted, and its scripts are not read"))?,
+        }
     }
     Phone::read(partitions, properties, libraries)
 }

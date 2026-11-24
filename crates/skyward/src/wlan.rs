@@ -38,9 +38,6 @@ const HOME: &str = "/skyward/run/supplicant";
 /// make its socket.
 const WIFI: u32 = 1010;
 
-/// How long the driver may take to make its interface, the chip's firmware
-/// loading meanwhile.
-const INTERFACE_WAIT: Duration = Duration::from_secs(20);
 
 /// How long the supplicant may take to open its control socket.
 const SOCKET_WAIT: Duration = Duration::from_secs(10);
@@ -634,9 +631,10 @@ fn bring_up(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
         for w in &cfg.writes {
             fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path))?;
         }
-        let until = Instant::now() + INTERFACE_WAIT;
+        let wait = Duration::from_secs(cfg.wait);
+        let until = Instant::now() + wait;
         while !net.exists() {
-            ensure!(Instant::now() < until, "the driver made no {} in {} seconds", cfg.interface, INTERFACE_WAIT.as_secs());
+            ensure!(Instant::now() < until, "the driver made no {} in {} seconds", cfg.interface, wait.as_secs());
             thread::sleep(Duration::from_millis(100));
         }
     }
@@ -689,14 +687,13 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
     if socket.exists() {
         fs::remove_file(&socket).with_context(|| format!("take away {}", socket.display()))?;
     }
-    let mut path: Vec<String> = cfg.libraries.clone();
-    if let Some(dir) = libraries {
-        path.push(dir.to_string_lossy().into_owned());
+    let path = library_path(&cfg.libraries, libraries);
+    let mut start = Process::new(&cfg.supplicant);
+    start.args(["-i", &cfg.interface, "-D", "nl80211", "-c"]).arg(&settings).env("LD_LIBRARY_PATH", path.join(":"));
+    if !cfg.preload.is_empty() {
+        start.env("LD_PRELOAD", cfg.preload.join(":"));
     }
-    let mut child = Process::new(&cfg.supplicant)
-        .args(["-i", &cfg.interface, "-D", "nl80211", "-c"])
-        .arg(&settings)
-        .env("LD_LIBRARY_PATH", path.join(":"))
+    let mut child = start
         .current_dir("/")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -715,6 +712,26 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
         thread::sleep(Duration::from_millis(100));
     }
     Ok(child)
+}
+
+/// The folders the supplicant's libraries are looked for in: those the
+/// configuration lists, in its order, the bundle of the vendor interface's
+/// libraries, `bundle`, where it puts [`skyward_config::BUNDLE`], and after
+/// them all where it names no place for it. A phone without the bundle
+/// leaves its place out.
+fn library_path(listed: &[String], bundle: Option<&Path>) -> Vec<String> {
+    let bundle = bundle.map(|dir| dir.to_string_lossy().into_owned());
+    let mut path: Vec<String> = Vec::with_capacity(listed.len() + 1);
+    for dir in listed {
+        match dir.as_str() == skyward_config::BUNDLE {
+            true => path.extend(bundle.clone()),
+            false => path.push(dir.clone()),
+        }
+    }
+    if !listed.iter().any(|dir| dir == skyward_config::BUNDLE) {
+        path.extend(bundle);
+    }
+    path
 }
 
 /// End the supplicant: asked to, where it can be, and killed after a while.

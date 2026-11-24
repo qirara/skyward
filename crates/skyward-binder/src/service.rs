@@ -49,6 +49,38 @@ fn methods() -> Result<Methods> {
     Ok(methods_of(sdk.parse().with_context(|| format!("{SDK} is {sdk:?}"))?))
 }
 
+/// A name no phone's directory has anything under, asked for to learn
+/// which mark the directory reads.
+const NOTHING: &str = "skyward.no.such.service";
+
+/// Have the calls written here carry the mark the service directory's copy
+/// of libbinder reads, and give it: the recovery copy's on a stock
+/// recovery, the system's on a recovery of another make that carries the
+/// installed system's libbinder, none on a build older than the mark. Each
+/// is tried with a lookup that changes nothing, which a directory turns
+/// away unread where the mark is not its own; the directory may still be
+/// starting, and is given a while to answer at all.
+#[cfg(target_os = "android")]
+pub fn settle_mark(binder: &crate::driver::Binder) -> Result<i32> {
+    use crate::parcel::{set_mark, RECOVERY, SYSTEM, UNMARKED, VENDOR};
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let mut last = None;
+        for mark in [RECOVERY, SYSTEM, VENDOR, UNMARKED] {
+            set_mark(mark);
+            match find(binder, NOTHING) {
+                Ok(_) => return Ok(mark),
+                Err(e) => last = Some(e),
+            }
+        }
+        set_mark(RECOVERY);
+        if std::time::Instant::now() >= until {
+            return Err(last.expect("a mark was tried")).context("the service directory read none of the marks");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 /// Every dump priority a service can register at, and the one a service
 /// registers at that asks for none.
 const DUMP_PRIORITY_ALL: i32 = 0b1111;

@@ -80,8 +80,24 @@ pub(crate) fn ticks(hz: f32) -> Vec<i8> {
     samples
 }
 
+/// The value a motor's strength file takes for `share` of the full
+/// strength, where it takes `top` as the strongest: rounded, and never
+/// none, which would play nothing at all.
+pub(crate) fn level(share: f32, top: u32) -> u32 {
+    ((share.clamp(0.0, 1.0) * top as f32).round() as u32).clamp(1, top)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_strength_file_is_given_its_own_scale_and_never_nothing() {
+        assert_eq!(super::level(1.0, 10_000), 10_000);
+        assert_eq!(super::level(0.2, 10_000), 2_000);
+        assert_eq!(super::level(0.00001, 10_000), 1, "the lightest still plays");
+        assert_eq!(super::level(1.5, 255), 255, "no more than the strongest");
+        assert_eq!(super::level(-1.0, 255), 1);
+    }
+
     use super::*;
 
     #[test]

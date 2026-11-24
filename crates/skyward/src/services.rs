@@ -16,6 +16,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -413,6 +414,10 @@ fn ready(s: &Service) -> Result<()> {
 
 fn supervise(s: &Service, who: &Credentials, given: &Given) -> ! {
     loop {
+        // Programs ended for good, by `end`, are not started again.
+        while !KEEP.load(Ordering::SeqCst) {
+            thread::park();
+        }
         let started = Instant::now();
         let ended = match running(&s.path) {
             Some(pid) => wait_for(pid).map(|()| format!("pid {pid}, left by an earlier recovery service, exited")),
@@ -429,6 +434,25 @@ fn supervise(s: &Service, who: &Credentials, given: &Given) -> ! {
     }
 }
 
+/// Whether the programs [`start`] keeps running are started again as they
+/// end. An update that writes the partitions they run from in place ends
+/// them for good, as it does on a phone without slots.
+static KEEP: AtomicBool = AtomicBool::new(true);
+
+/// End every program [`start`] keeps running, for good: none is started
+/// again for the rest of the recovery service's run. They run from the
+/// installed system's partitions, which an update is about to write over
+/// in place.
+pub fn end() {
+    KEEP.store(false, Ordering::SeqCst);
+    for pid in STARTED.lock().expect("no thread panics while it holds the programs started").drain(..) {
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    }
+}
+
+/// The programs running that [`start`] started, by their process ids.
+static STARTED: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
 /// Start the program and wait for it to end.
 fn run(s: &Service, who: &Credentials, given: &Given) -> Result<String> {
     let handed = given.make()?;
@@ -436,8 +460,22 @@ fn run(s: &Service, who: &Credentials, given: &Given) -> Result<String> {
     // The program has its sockets now, and as init does, the recovery
     // keeps none of them open itself.
     drop(handed);
+    let pid = child.id();
+    let kept = {
+        let mut started = STARTED.lock().expect("no thread panics while it holds the programs started");
+        let kept = KEEP.load(Ordering::SeqCst);
+        if kept {
+            started.push(pid);
+        }
+        kept
+    };
+    // One started just as the rest were ended goes with them.
+    if !kept {
+        let _ = child.kill();
+    }
     let status = child.wait().context("wait for it")?;
-    Ok(format!("pid {} ended: {status}", child.id()))
+    STARTED.lock().expect("no thread panics while it holds the programs started").retain(|&p| p != pid);
+    Ok(format!("pid {pid} ended: {status}"))
 }
 
 /// The program as it is started: with what it is given, from the top of the

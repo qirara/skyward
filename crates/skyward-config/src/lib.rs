@@ -167,16 +167,36 @@ pub struct Wlan {
     /// The phone's own wpa_supplicant.
     pub supplicant: String,
     /// Directories for its LD_LIBRARY_PATH, searched in order and before
-    /// the libraries of the vendor interface the phone was built against.
+    /// the libraries of the vendor interface the phone was built against,
+    /// unless an entry [`BUNDLE`] says where among them those are searched.
     #[serde(default)]
     pub libraries: Vec<String>,
+    /// Libraries loaded ahead of everything it asks for, each by its path:
+    /// a C++ runtime newer than the one the vendor interface's libraries
+    /// carry, where what it logs through is built against that one.
+    #[serde(default)]
+    pub preload: Vec<String>,
     /// The service it registers with the service directory as it starts,
     /// which the directory takes only from a program the running system
-    /// describes.
-    pub service: String,
+    /// describes. A supplicant of the older kind registers with the
+    /// directory of the phone's hardware services instead, and names none.
+    #[serde(default)]
+    pub service: Option<String>,
+    /// How many seconds the driver may take to make its interface, its
+    /// firmware loading meanwhile.
+    #[serde(default = "default_interface_wait")]
+    pub wait: u64,
     /// The page the stock system asks over plain HTTP to tell whether a
     /// network reaches the internet, which answers 204 with nothing.
     pub probe: String,
+}
+
+/// The entry of [`Wlan::libraries`] that stands for the folder of the
+/// libraries of the vendor interface the phone was built against.
+pub const BUNDLE: &str = "$bundle";
+
+fn default_interface_wait() -> u64 {
+    20
 }
 
 /// A value written to a file, such as a switch in sysfs.
@@ -267,15 +287,39 @@ pub struct Haptics {
     #[serde(default)]
     pub click: Option<i16>,
     /// The file the driver says the motor's resonant frequency in, in
-    /// tenths of a hertz whatever its label.
-    pub resonance: String,
+    /// tenths of a hertz whatever its label; a motor played by
+    /// [`timed`](Self::timed) has none.
+    #[serde(default)]
+    pub resonance: Option<String>,
     pub strength: Strength,
+    /// The files a motor the kernel plays for as long as it is told is
+    /// played by, on phones whose driver offers no force-feedback events:
+    /// Samsung's, among others, as the timed_output class had them.
+    #[serde(default)]
+    pub timed: Option<Timed>,
     /// Whether the strength goes into the samples made, each made that
     /// share of itself and played at the driver's full magnitude, on
     /// phones whose driver plays samples at only two strengths whatever
     /// magnitude between none and the full one it is given.
     #[serde(default)]
     pub scale_samples: bool,
+}
+
+/// A motor played by writing how long it is to play, in milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Timed {
+    /// The file the length is written to, which plays it.
+    pub duration: String,
+    /// The file the strength is written to, where the driver takes one,
+    /// and the value it takes as the strongest.
+    #[serde(default)]
+    pub intensity: Option<String>,
+    #[serde(default)]
+    pub intensity_max: Option<u32>,
+    /// How long a click plays, and how long the ticks of the screen going
+    /// off by the power key, in milliseconds.
+    pub click: u32,
+    pub ticks: u32,
 }
 
 /// How strongly the click plays, each as a share of the most its waveform
@@ -600,8 +644,27 @@ impl DeviceConfig {
             ensure!(plain && !folder.is_empty(), "[backup] data_skipped: {folder} is not a path from the top of {DATA}");
         }
         if let Some(haptics) = &cfg.haptics {
-            let file = &haptics.resonance;
-            ensure!(Path::new(file).is_absolute(), "[haptics] resonance: {file} is not an absolute path");
+            match (&haptics.resonance, &haptics.timed) {
+                (Some(file), None) => ensure!(Path::new(file).is_absolute(), "[haptics] resonance: {file} is not an absolute path"),
+                (None, Some(timed)) => {
+                    for file in [Some(&timed.duration), timed.intensity.as_ref()].into_iter().flatten() {
+                        ensure!(Path::new(file).is_absolute(), "[haptics] timed: {file} is not an absolute path");
+                    }
+                    ensure!(
+                        (1..=1000).contains(&timed.click) && (1..=1000).contains(&timed.ticks),
+                        "[haptics] timed: a click of {} ms and ticks of {} ms are not lengths from 1 ms to a second",
+                        timed.click,
+                        timed.ticks
+                    );
+                    ensure!(
+                        timed.intensity.is_some() == timed.intensity_max.is_some_and(|top| top > 0),
+                        "[haptics] timed: a strength file goes with the value it takes as the strongest, and that without it with nothing"
+                    );
+                    ensure!(haptics.click.is_none() && !haptics.scale_samples, "[haptics] timed: a motor played by its length plays no waveform or samples");
+                }
+                (Some(_), Some(_)) => anyhow::bail!("[haptics] names both a resonant frequency and a timed motor; a motor is played one way"),
+                (None, None) => anyhow::bail!("[haptics] names neither the file the motor's resonant frequency is in nor a timed motor"),
+            }
             let Strength { lightest, strongest } = haptics.strength;
             ensure!(
                 0.0 < lightest && lightest < strongest && strongest <= 1.0,
@@ -653,6 +716,18 @@ impl DeviceConfig {
         }
         if let Some(wlan) = &cfg.wlan {
             ensure!(wlan.probe.starts_with("http://"), "[wlan] probe: {} is not a plain HTTP address", wlan.probe);
+            for dir in &wlan.libraries {
+                ensure!(dir == BUNDLE || Path::new(dir).is_absolute(), "[wlan] libraries: {dir} is neither an absolute path nor {BUNDLE}");
+            }
+            ensure!(wlan.libraries.iter().filter(|dir| *dir == BUNDLE).count() <= 1, "[wlan] libraries: {BUNDLE} is named more than once");
+            for library in &wlan.preload {
+                let path = Path::new(library);
+                ensure!(path.is_absolute() && path.file_name().is_some(), "[wlan] preload: {library} is not an absolute path to a file");
+            }
+            if let Some(service) = &wlan.service {
+                ensure!(service.contains('/') && !service.contains(char::is_whitespace), "[wlan] service: {service} is not a service's interface and instance");
+            }
+            ensure!((1..=600).contains(&wlan.wait), "[wlan] wait: {} is not a number of seconds from 1 to 600", wlan.wait);
             for file in &wlan.firmware {
                 let name = Path::new(&file.name);
                 let plain = name.components().all(|c| matches!(c, std::path::Component::Normal(_)));
@@ -712,7 +787,7 @@ mod tests {
     fn ishtar_clicks_with_a_waveform_its_driver_keeps() {
         let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
         let haptics = cfg.haptics.expect("the 13 Ultra has a motor");
-        assert_eq!((haptics.click, haptics.resonance.as_str()), (Some(0), "/sys/class/qcom-haptics/lra_frequency_hz"));
+        assert_eq!((haptics.click, haptics.resonance.as_deref().unwrap()), (Some(0), "/sys/class/qcom-haptics/lra_frequency_hz"));
         assert_eq!(haptics.strength, Strength { lightest: 0.5, strongest: 1.0 });
         assert!(!haptics.scale_samples, "its strength is the magnitude its driver is given");
     }
@@ -721,7 +796,7 @@ mod tests {
     fn socrates_clicks_with_samples_made_as_strong_as_the_slider_says() {
         let cfg = DeviceConfig::parse(include_str!("../../../devices/socrates.toml")).unwrap();
         let haptics = cfg.haptics.expect("the K60 Pro has a motor");
-        assert_eq!((haptics.click, haptics.resonance.as_str()), (None, "/sys/class/qcom-haptics/lra_frequency_hz"));
+        assert_eq!((haptics.click, haptics.resonance.as_deref().unwrap()), (None, "/sys/class/qcom-haptics/lra_frequency_hz"));
         assert_eq!(haptics.strength, Strength { lightest: 0.15, strongest: 1.0 });
         assert!(haptics.scale_samples, "its driver plays samples at two strengths alone");
     }
@@ -739,6 +814,25 @@ mod tests {
             let s = format!("{resonance}\nstrength = {{ lightest = {lightest:?}, strongest = {strongest:?} }}");
             assert!(with(&s).is_err(), "{lightest} to {strongest} is refused");
         }
+    }
+
+    #[test]
+    fn a_timed_motor_is_played_by_its_files_alone() {
+        let with = |body: &str| DeviceConfig::parse(&format!("[device]\ncodename = \"x\"\n[haptics]\nstrength = {{ lightest = 0.2, strongest = 1.0 }}\n{body}\n"));
+        let timed = "[haptics.timed]\nduration = \"/sys/class/timed_output/vibrator/enable\"\nclick = 30\nticks = 12";
+        let cfg = with(timed).unwrap();
+        let t = cfg.haptics.unwrap().timed.unwrap();
+        assert_eq!((t.duration.as_str(), t.click, t.ticks, t.intensity), ("/sys/class/timed_output/vibrator/enable", 30, 12, None));
+        let strong = format!("{timed}\nintensity = \"/sys/class/timed_output/vibrator/intensity\"\nintensity_max = 10000");
+        assert_eq!(with(&strong).unwrap().haptics.unwrap().timed.unwrap().intensity_max, Some(10000));
+        assert!(with(&format!("{timed}\nintensity = \"/sys/i\"")).is_err(), "a strength file without its strongest value");
+        assert!(with(&format!("{timed}\nintensity_max = 100")).is_err(), "a strongest value without its file");
+        assert!(with(&timed.replace("/sys/class", "sys/class")).is_err(), "a file named from nowhere");
+        assert!(with(&timed.replace("click = 30", "click = 0")).is_err(), "a click of no length");
+        let both = format!("resonance = \"/sys/class/qcom-haptics/lra_frequency_hz\"\n{timed}");
+        assert!(with(&both).is_err(), "a motor is played one way");
+        assert!(with("").is_err(), "a motor played no way at all");
+        assert!(with(&format!("click = 0\n{timed}")).is_err(), "a timed motor plays no waveform of its driver's");
     }
 
     #[test]
@@ -760,6 +854,26 @@ mod tests {
         let stock = "[stock]\nversion = \"V\"\npackage = \"https://d.example/V/x-V.zip\"\nrecovery = \"{sum}\"\n";
         let both = format!("[device]\ncodename = \"x\"\n{}[base]\nthird_party = true\n", stock.replace("{sum}", sum));
         assert!(DeviceConfig::parse(&both).is_err(), "built on the stock recovery and on another at once");
+    }
+
+    #[test]
+    fn the_vendor_interfaces_libraries_go_where_the_configuration_puts_them() {
+        let with = |body: &str| {
+            DeviceConfig::parse(&format!(
+                "[device]\ncodename = \"x\"\n[wlan]\nmodules = []\ninterface = \"wlan0\"\nsupplicant = \"/s\"\nprobe = \"http://p/generate_204\"\n{body}\n"
+            ))
+        };
+        let wlan = with("libraries = [\"/system/wifi-vndk/lib64\", \"$bundle\", \"/vendor/lib64\"]\npreload = [\"/system/lib64/libc++.so\"]\nwait = 60")
+            .unwrap()
+            .wlan
+            .unwrap();
+        assert_eq!(wlan.libraries[1], BUNDLE);
+        assert_eq!((wlan.preload.as_slice(), wlan.wait, wlan.service), (&["/system/lib64/libc++.so".to_string()][..], 60, None));
+        assert!(with("libraries = [\"$bundle\", \"$bundle\"]").is_err(), "the bundle has one place");
+        assert!(with("libraries = [\"vendor/lib64\"]").is_err(), "a folder named from nowhere");
+        assert!(with("preload = [\"libc++.so\"]").is_err(), "a library named from nowhere");
+        assert!(with("service = \"ISupplicant\"").is_err(), "a service names its instance");
+        assert!(with("wait = 0").is_err(), "a driver given no time at all");
     }
 
     #[test]
@@ -809,7 +923,7 @@ mod tests {
         assert_eq!(post_boot.args, ["/vendor/bin/init.kernel.post_boot.sh"]);
         assert_eq!(post_boot.libraries, ["/system/lib64", "/vendor/lib64"], "it loads the recovery's own libraries first");
         let haptics = cfg.haptics.expect("the 17 Ultra has a motor");
-        assert_eq!((haptics.click, haptics.resonance.as_str()), (None, "/sys/class/qcom-haptics/lra_frequency_hz"), "its click is made");
+        assert_eq!((haptics.click, haptics.resonance.as_deref().unwrap()), (None, "/sys/class/qcom-haptics/lra_frequency_hz"), "its click is made");
         assert_eq!(haptics.strength, Strength { lightest: 0.25, strongest: 0.75 }, "past three quarters the motor rattles");
         assert_eq!(cfg.backup.efs, ["modemst1", "modemst2", "fsg", "fsc", "persist"]);
         assert!(cfg.backup.data_skipped.contains(&"vendor/goodix".to_string()));
@@ -1000,7 +1114,8 @@ mod tests {
         assert_eq!(wlan.firmware[1].partition.as_deref(), Some("persist"));
         assert_eq!(wlan.firmware[1].path, "kiwi_v2/wlan_mac.bin");
         assert_eq!(wlan.interface, "wlan0");
-        assert_eq!(wlan.service, "android.hardware.wifi.supplicant.ISupplicant/default");
+        assert_eq!(wlan.service.as_deref(), Some("android.hardware.wifi.supplicant.ISupplicant/default"));
+        assert_eq!((wlan.preload.len(), wlan.wait), (0, 20), "nothing preloaded, and the driver given what it always was");
         assert_eq!(wlan.probe, "http://connect.rom.miui.com/generate_204");
         assert_eq!(cfg.update.expect("its update server is known").server, "https://update.miui.com/updates/miotaV3.php");
     }

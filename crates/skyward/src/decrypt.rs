@@ -5,7 +5,7 @@
 use anyhow::Result;
 use skyward_binder::driver::Binder;
 use skyward_crypto::data::{self, Closed, Opening};
-use skyward_crypto::keymint::KeyMint;
+use skyward_crypto::Service as KeyService;
 use skyward_sys::worker::Worker;
 use std::os::fd::RawFd;
 
@@ -56,10 +56,10 @@ impl Decryptor {
 
 /// Do `work` with the phone's key service, reached afresh for it, and say
 /// why it failed in words for the page.
-pub fn with_key_service<T>(work: impl FnOnce(&KeyMint) -> Result<T>) -> Result<T, String> {
+pub fn with_key_service<T>(work: impl FnOnce(&KeyService) -> Result<T>) -> Result<T, String> {
     let done = (|| {
-        let binder = Binder::open()?;
-        let service = KeyMint::open(&binder)?;
+        let (binder, hardware) = (Binder::open()?, Binder::hardware()?);
+        let service = KeyService::open(&binder, &hardware)?;
         work(&service)
     })();
     done.map_err(|e| format!("{e:#}"))
@@ -70,13 +70,13 @@ pub fn with_key_service<T>(work: impl FnOnce(&KeyMint) -> Result<T>) -> Result<T
 /// partition encrypted, and nothing where it has not, so that a partition
 /// kept as the plain filesystem it is opens on a phone whose key service
 /// does not start. Says why it failed in words for the page.
-pub fn with_data_keys<T>(work: impl FnOnce(Option<&KeyMint>) -> Result<T>) -> Result<T, String> {
+pub fn with_data_keys<T>(work: impl FnOnce(Option<&KeyService>) -> Result<T>) -> Result<T, String> {
     let done = (|| {
         if !data::keyed()? {
             return work(None);
         }
-        let binder = Binder::open()?;
-        let service = KeyMint::open(&binder)?;
+        let (binder, hardware) = (Binder::open()?, Binder::hardware()?);
+        let service = KeyService::open(&binder, &hardware)?;
         work(Some(&service))
     })();
     done.map_err(|e| format!("{e:#}"))

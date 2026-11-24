@@ -1,9 +1,31 @@
 use anyhow::{bail, Context, Result};
+use std::sync::atomic::{AtomicI32, Ordering};
 
-/// The mark libbinder writes into every call header. Both ends have to agree
-/// on it: it tells apart the copies of libbinder a phone carries, and the one
-/// the recovery's own programs are built from is the recovery copy.
-const HEADER: i32 = i32::from_be_bytes(*b"RECO");
+/// The marks libbinder writes into every call header. Both ends have to
+/// agree on it: it tells apart the copies of libbinder a phone carries. A
+/// stock recovery's own programs are built from the recovery copy; a
+/// recovery of another make may carry the system's.
+pub const RECOVERY: i32 = i32::from_be_bytes(*b"RECO");
+pub const SYSTEM: i32 = i32::from_be_bytes(*b"SYST");
+pub const VENDOR: i32 = i32::from_be_bytes(*b"VNDR");
+/// No mark at all, as libbinder wrote none before Android 11.
+pub const UNMARKED: i32 = 0;
+
+/// The mark the calls written here carry, the recovery copy's until
+/// [`set_mark`] says otherwise.
+static MARK: AtomicI32 = AtomicI32::new(RECOVERY);
+
+/// Have the calls written from now on carry `mark`, as the copy of
+/// libbinder the service directory runs on reads it; [`UNMARKED`] leaves
+/// the mark out.
+pub fn set_mark(mark: i32) {
+    MARK.store(mark, Ordering::Relaxed);
+}
+
+/// The mark the calls written now carry.
+pub fn mark() -> i32 {
+    MARK.load(Ordering::Relaxed)
+}
 
 /// Strict mode gathers violations rather than acting on them; a caller with
 /// no policy of its own still sets that bit.
@@ -76,7 +98,10 @@ impl Parcel {
         let mut p = Parcel::default();
         p.i32(STRICT_MODE_PENALTY_GATHER);
         p.i32(UNSET_WORK_SOURCE);
-        p.i32(HEADER);
+        match mark() {
+            UNMARKED => {}
+            mark => p.i32(mark),
+        }
         p.string(interface);
         p
     }

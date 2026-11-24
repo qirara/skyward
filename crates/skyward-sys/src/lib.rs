@@ -172,6 +172,9 @@ impl Power {
 }
 
 pub fn power(target: Power) -> Result<()> {
+    // What was written goes to the flash before anything ends the phone: a
+    // recovery of another make may end it without the sync of its own init.
+    unsafe { libc::sync() };
     set_prop("sys.powerctl", target.command())
 }
 

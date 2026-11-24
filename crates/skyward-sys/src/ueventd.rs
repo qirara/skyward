@@ -2,15 +2,22 @@ use std::collections::HashMap;
 
 /// Where the phone keeps the rules for its own device nodes, and the names
 /// its own partitions give to the accounts those rules name.
-pub const RULE_FILES: [&str; 2] = ["/vendor/etc/ueventd.rc", "/odm/etc/ueventd.rc"];
+/// ueventd reads them from the root of each partition as well, where a
+/// vendor partition built for an older Android, as Samsung's, keeps them.
+pub const RULE_FILES: [&str; 4] = ["/vendor/etc/ueventd.rc", "/vendor/ueventd.rc", "/odm/etc/ueventd.rc", "/odm/ueventd.rc"];
 pub const PASSWD_FILES: [&str; 2] = ["/vendor/etc/passwd", "/odm/etc/passwd"];
 pub const GROUP_FILES: [&str; 2] = ["/vendor/etc/group", "/odm/etc/group"];
 
-/// The accounts Android fixes once and for all. The rules, and the init
+/// The accounts Android fixes once and for all, as its
+/// android_filesystem_config.h numbers them. The rules, and the init
 /// scripts of the phone's own programs, name them rather than their
-/// numbers, and a recovery has no list of its own to look them up in.
-const ACCOUNTS: [(&str, u32); 33] = [
+/// numbers, and a recovery has no list of its own to look them up in; a
+/// recovery of another make may carry none of the newer ones.
+const ACCOUNTS: [(&str, u32); 118] = [
     ("root", 0),
+    ("daemon", 1),
+    ("bin", 2),
+    ("sys", 3),
     ("system", 1000),
     ("radio", 1001),
     ("bluetooth", 1002),
@@ -31,17 +38,99 @@ const ACCOUNTS: [(&str, u32); 33] = [
     ("keystore", 1017),
     ("usb", 1018),
     ("drm", 1019),
+    ("mdnsr", 1020),
     ("gps", 1021),
     ("media_rw", 1023),
     ("mtp", 1024),
     ("drmrpc", 1026),
     ("nfc", 1027),
+    ("sdcard_r", 1028),
+    ("clat", 1029),
+    ("loop_radio", 1030),
+    ("media_drm", 1031),
+    ("package_info", 1032),
+    ("sdcard_pics", 1033),
+    ("sdcard_av", 1034),
+    ("sdcard_all", 1035),
+    ("logd", 1036),
+    ("shared_relro", 1037),
+    ("dbus", 1038),
+    ("tlsdate", 1039),
+    ("media_ex", 1040),
     ("audioserver", 1041),
+    ("metrics_coll", 1042),
+    ("metricsd", 1043),
+    ("webserv", 1044),
+    ("debuggerd", 1045),
+    ("media_codec", 1046),
     ("cameraserver", 1047),
+    ("firewall", 1048),
+    ("trunks", 1049),
+    ("nvram", 1050),
+    ("dns", 1051),
+    ("dns_tether", 1052),
+    ("webview_zygote", 1053),
+    ("vehicle_network", 1054),
+    ("media_audio", 1055),
+    ("media_video", 1056),
+    ("media_image", 1057),
+    ("tombstoned", 1058),
+    ("media_obb", 1059),
+    ("ese", 1060),
+    ("ota_update", 1061),
+    ("automotive_evs", 1062),
+    ("lowpan", 1063),
+    ("hsm", 1064),
+    ("reserved_disk", 1065),
+    ("statsd", 1066),
+    ("incidentd", 1067),
+    ("secure_element", 1068),
+    ("lmkd", 1069),
+    ("llkd", 1070),
+    ("iorapd", 1071),
+    ("gpu_service", 1072),
+    ("network_stack", 1073),
+    ("gsid", 1074),
+    ("fsverity_cert", 1075),
+    ("credstore", 1076),
+    ("external_storage", 1077),
+    ("ext_data_rw", 1078),
+    ("ext_obb_rw", 1079),
+    ("context_hub", 1080),
+    ("virtualizationservice", 1081),
+    ("artd", 1082),
+    ("uwb", 1083),
+    ("thread_network", 1084),
+    ("diced", 1085),
+    ("dmesgd", 1086),
+    ("jc_weaver", 1087),
+    ("jc_strongbox", 1088),
+    ("jc_identitycred", 1089),
+    ("sdk_sandbox", 1090),
+    ("security_log_writer", 1091),
+    ("prng_seeder", 1092),
+    ("uprobestats", 1093),
+    ("cros_ec", 1094),
+    ("mmd", 1095),
+    ("update_engine_log", 1096),
     ("shell", 2000),
+    ("cache", 2001),
+    ("diag", 2002),
+    ("net_bt_admin", 3001),
+    ("net_bt", 3002),
+    ("inet", 3003),
+    ("net_raw", 3004),
+    ("net_admin", 3005),
+    ("net_bw_stats", 3006),
+    ("net_bw_acct", 3007),
+    ("net_bt_stack", 3008),
     ("readproc", 3009),
     ("wakelock", 3010),
     ("uhid", 3011),
+    ("readtracefs", 3012),
+    ("virtualmachine", 3013),
+    ("everybody", 9997),
+    ("misc", 9998),
     ("nobody", 9999),
 ];
 
@@ -86,6 +175,11 @@ pub fn accounts(files: &[&str]) -> HashMap<String, u32> {
 pub fn account(known: &HashMap<String, u32>, name: &str) -> Option<u32> {
     if let Some(id) = known.get(name) {
         return Some(*id);
+    }
+    // init takes a number for the account itself, as a phone's scripts
+    // name a group only its own lists have by its number.
+    if let Ok(id) = name.parse() {
+        return Some(id);
     }
     name.strip_prefix("oem_").and_then(|n| n.parse().ok())
 }
@@ -248,6 +342,16 @@ mod tests {
         let parsed = rules("/dev/x 0600 root root\n/dev/x 0660 system drmrpc\n", &known());
         let last = parsed.iter().rev().find(|r| r.matches("/dev/x")).expect("a rule for it");
         assert_eq!((last.mode, last.uid, last.gid), (0o660, 1000, 1026));
+    }
+
+    #[test]
+    fn an_account_is_named_by_android_s_list_or_given_by_its_number() {
+        let known = known();
+        assert_eq!(account(&known, "drmrpc"), Some(1026));
+        assert_eq!(account(&known, "net_bt_stack"), Some(3008), "one of the newer fixed accounts");
+        assert_eq!(account(&known, "5678"), Some(5678), "a group a script names by its number");
+        assert_eq!(account(&known, "oem_2901"), Some(2901));
+        assert_eq!(account(&known, "nosuchaccount"), None);
     }
 
     #[test]

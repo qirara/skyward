@@ -1,8 +1,9 @@
 //! What a recovery does to use the keys of a Samsung phone, found in what
 //! its own partitions say. The files under tests/samsung/p3q are the init
 //! scripts and hardware descriptions of the key services of an SM-G9980's
-//! stock Android 11 vendor partition, the programs they name standing in
-//! as empty files, kept apart from the whole stock builds under
+//! stock Android 11 vendor partition, and the script of the system's own
+//! directory for hardware services, the programs they name standing in as
+//! empty files, kept apart from the whole stock builds under
 //! tests/described:
 //! a vendor whose key service is still Keymaster 4, reached as a hardware
 //! service of the older kind, on a phone without slots and so without a
@@ -55,7 +56,8 @@ fn the_s21_ultra_starts_the_key_services_of_the_older_kind_its_scripts_name() {
     assert_eq!(
         names(&steps),
         ["qseecomd", "ssgtzd", "android.hardware.keymaster@4.0-service", "android.hardware.gatekeeper@1.0-service"],
-        "the listeners, the opener, the key service and the credential service, and no boot control on a phone without slots"
+        "the listeners, the opener, the key service and the credential service, and no boot control on a phone without slots; \
+         not the system's own directory, beside the one the recovery of another make runs, through a loader of its own"
     );
     let Step::Start(keymaster) = &steps[2] else { panic!("the key service is started") };
     assert_eq!(keymaster.service.ready_hardware_service.as_deref(), Some("android.hardware.keymaster@4.0::IKeymasterDevice/default"));
@@ -79,8 +81,13 @@ fn on_a_recovery_of_another_make_a_hardware_service_runs_on_its_own_libraries_fi
 
 #[test]
 fn on_its_own_recovery_a_hardware_service_runs_as_on_any_other_phone() {
-    let phone = p3q(false);
-    assert!(secure::steps(&phone).is_err(), "the vendor partition runs no directory for hardware services of its own");
+    let steps = secure::steps(&p3q(false)).unwrap();
+    let names = names(&steps);
+    let directory = names.iter().position(|n| n == "hwservicemanager").expect("the system's own directory, as on any phone");
+    let keys = names.iter().position(|n| n == "android.hardware.keymaster@4.0-service").unwrap();
+    assert!(directory < keys, "the directory before the key service that registers with it: {names:?}");
+    let Step::Start(keymaster) = &steps[keys] else { panic!("the key service is started") };
+    assert!(keymaster.environment.is_empty(), "nothing loaded ahead on the recovery the libraries were built for");
 }
 
 #[test]

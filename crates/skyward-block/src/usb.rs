@@ -17,9 +17,18 @@ const DEV_BLOCK: &str = "/dev/block";
 /// The filesystems a USB drive may hold, in the order they are tried, with
 /// what each is mounted with to give names as the drive keeps them: FAT
 /// and exFAT keep long names in UTF-16, which the kernel otherwise turns
-/// into a code page without Chinese.
-const FILESYSTEMS: [(&str, &str); 5] =
-    [("vfat", "utf8"), ("exfat", "iocharset=utf8"), ("ntfs3", "iocharset=utf8"), ("ext4", ""), ("f2fs", "")];
+/// into a code page without Chinese. Samsung's kernels read exFAT through
+/// sdfat, a driver of their own, and NTFS through the older ntfs driver
+/// alone, which names its character set nls.
+const FILESYSTEMS: [(&str, &str); 7] = [
+    ("vfat", "utf8"),
+    ("exfat", "iocharset=utf8"),
+    ("sdfat", "iocharset=utf8"),
+    ("ntfs3", "iocharset=utf8"),
+    ("ntfs", "nls=utf8"),
+    ("ext4", ""),
+    ("f2fs", ""),
+];
 
 /// A USB drive as the kernel lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]

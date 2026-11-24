@@ -228,13 +228,16 @@ pub fn steps(phone: &Phone) -> Result<Vec<Step>> {
         Kind::Hidl => Ready::HardwareService(name),
     };
     // The directory for hardware services comes before the first of them,
-    // which is the key service where that is of the older kind.
+    // which is the key service where that is of the older kind. A recovery
+    // of another make runs a directory of its own, which the services
+    // register with as they would on the phone: the phone's own beside it
+    // would be a second, built for a loader the recovery's own needs.
     let directory = |out: &mut Vec<Step>| -> Result<()> {
+        if phone.foreign {
+            return Ok(());
+        }
         match phone.programs.iter().find(|p| p.name == HARDWARE_DIRECTORY && phone.carries(p)) {
             Some(directory) => start(out, started(phone, directory, Ready::Property(HARDWARE_DIRECTORY_READY), Vec::new())),
-            // A recovery of another make may run a directory of its own,
-            // which the services register with as they would on the phone.
-            None if phone.foreign => {}
             None => bail!("the phone has hardware services of the older kind, and no directory for them among the programs its scripts name"),
         }
         Ok(())

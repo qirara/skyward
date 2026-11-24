@@ -606,13 +606,14 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
     let programs = || services.iter().map(|p| &p.service).chain(&key_programs);
     let hardware: Vec<String> = programs().filter_map(|s| s.ready_hardware_service.clone()).collect();
     if !hardware.is_empty() {
-        secure::prepare_hardware_directory(&hardware)?;
+        secure::prepare_hardware_directory(&hardware, cfg.base.third_party)?;
         skyward_sys::kmsg("the directory for the phone's hardware services can run")?;
         // A recovery of another make runs a directory of its own, which read
         // the recovery's description as it started and keeps what it read:
         // started again, it reads the one that names the phone's services.
         if cfg.base.third_party {
-            skyward_sys::set_prop("ctl.restart", secure::HARDWARE_DIRECTORY_SERVICE)?;
+            secure::restart_own_hardware_directory()?;
+            skyward_sys::kmsg("the recovery's own directory for hardware services started again")?;
         }
     }
     // A program that registers with the service directory needs the

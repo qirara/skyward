@@ -135,8 +135,66 @@ const RECOVERY_MANIFEST: &str = "/system/etc/vintf/manifest.xml";
 /// the driver under a name that a recovery, which has the driver's own
 /// filesystem, does not have.
 ///
+/// A recovery of another make, `foreign`, runs a directory of its own
+/// instead, which its init starts through the recovery's own loader, under
+/// the very name the installed system's asks for, and which reads the
+/// recovery's own labels: those stay as they are, and only the description
+/// of the services is written for it.
+///
 /// `wanted` names the hardware services that will be asked for.
-pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
+pub fn prepare_hardware_directory(wanted: &[String], foreign: bool) -> Result<()> {
+    if !foreign {
+        early_loader_and_labels()?;
+    }
+    let driver = Path::new(HARDWARE_DRIVER);
+    if !driver.exists() {
+        std::os::unix::fs::symlink(HARDWARE_DRIVER_NODE, driver)
+            .with_context(|| format!("point {HARDWARE_DRIVER} at {HARDWARE_DRIVER_NODE}"))?;
+    }
+    // The system's own init opens the driver to every program, as it does
+    // /dev/binder; a recovery's, which uses none of it, leaves it root's
+    // alone, and the directory and the services that register with it run
+    // as the users their init scripts name.
+    fs::set_permissions(driver, std::os::unix::fs::PermissionsExt::from_mode(0o666))
+        .with_context(|| format!("open {HARDWARE_DRIVER} to every program"))?;
+    // A recovery of another make may carry no description folder at all,
+    // and the directory reads it as the user its init script names.
+    let folder = Path::new(RECOVERY_MANIFEST).parent().expect("the description is in a folder");
+    fs::create_dir_all(folder).with_context(|| format!("make {}", folder.display()))?;
+    fs::set_permissions(folder, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .with_context(|| format!("open {} to every user", folder.display()))?;
+    fs::write(RECOVERY_MANIFEST, describe_hardware(wanted)?).with_context(|| format!("write {RECOVERY_MANIFEST}"))?;
+    fs::set_permissions(RECOVERY_MANIFEST, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+        .with_context(|| format!("let every user read {RECOVERY_MANIFEST}"))?;
+    // The directory turns itself off when it cannot find its own
+    // description, and a run of it before this was written may have left
+    // that behind.
+    skyward_sys::set_prop(DIRECTORY_OFF, "false")?;
+    Ok(())
+}
+
+/// What the directory says once it is ready, and how long it may take.
+const HARDWARE_DIRECTORY_READY: &str = "hwservicemanager.ready";
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Have init start again the directory a recovery of another make runs,
+/// which read the descriptions of the services as it started, before the
+/// phone's partitions were there to describe them; and wait until it says
+/// it is ready, as the services register with it next. Stopped and started,
+/// it does not wait out the pause init keeps between two starts of a
+/// service, nor have init start again what its script restarts with it.
+pub fn restart_own_hardware_directory() -> Result<()> {
+    skyward_sys::set_prop("ctl.stop", HARDWARE_DIRECTORY_SERVICE).context("have init stop the directory")?;
+    skyward_sys::wait_prop(&format!("init.svc.{HARDWARE_DIRECTORY_SERVICE}"), "stopped", STOP_TIMEOUT)?;
+    // The one stopped said it was ready, and nothing else takes that back.
+    skyward_sys::set_prop(HARDWARE_DIRECTORY_READY, "false")?;
+    skyward_sys::set_prop("ctl.start", HARDWARE_DIRECTORY_SERVICE).context("have init start the directory again")?;
+    skyward_sys::wait_prop(HARDWARE_DIRECTORY_READY, "true", READY_TIMEOUT).context("wait for the directory to start again")
+}
+
+/// Give the installed system's directory the loader it was built with and
+/// the labels it decides by, where a recovery runs that one.
+fn early_loader_and_labels() -> Result<()> {
     // A loader and the lowest libraries are built together and agree
     // between them on how a program's own storage is laid out, so the
     // installed system's programs are loaded by the installed system's
@@ -157,17 +215,6 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
         fs::remove_file(loader).with_context(|| format!("take away {}", loader.display()))?;
     }
     std::os::unix::fs::symlink(&from, loader).with_context(|| format!("point {} at {}", loader.display(), from.display()))?;
-    let driver = Path::new(HARDWARE_DRIVER);
-    if !driver.exists() {
-        std::os::unix::fs::symlink(HARDWARE_DRIVER_NODE, driver)
-            .with_context(|| format!("point {HARDWARE_DRIVER} at {HARDWARE_DRIVER_NODE}"))?;
-    }
-    // The system's own init opens the driver to every program, as it does
-    // /dev/binder; a recovery's, which uses none of it, leaves it root's
-    // alone, and the directory and the services that register with it run
-    // as the users their init scripts name.
-    fs::set_permissions(driver, std::os::unix::fs::PermissionsExt::from_mode(0o666))
-        .with_context(|| format!("open {HARDWARE_DRIVER} to every program"))?;
     let from = Path::new(SERVICE_LABELS);
     let into = Path::new(RECOVERY_LABELS).join(from.file_name().expect("a named file"));
     fs::create_dir_all(RECOVERY_LABELS).with_context(|| format!("make {RECOVERY_LABELS}"))?;
@@ -177,19 +224,6 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
     fs::set_permissions(RECOVERY_LABELS, std::os::unix::fs::PermissionsExt::from_mode(0o755))
         .with_context(|| format!("open {RECOVERY_LABELS} to every user"))?;
     fs::copy(from, &into).with_context(|| format!("copy {} to {}", from.display(), into.display()))?;
-    // A recovery of another make may carry no description folder at all,
-    // and the directory reads it as the user its init script names.
-    let folder = Path::new(RECOVERY_MANIFEST).parent().expect("the description is in a folder");
-    fs::create_dir_all(folder).with_context(|| format!("make {}", folder.display()))?;
-    fs::set_permissions(folder, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .with_context(|| format!("open {} to every user", folder.display()))?;
-    fs::write(RECOVERY_MANIFEST, describe_hardware(wanted)?).with_context(|| format!("write {RECOVERY_MANIFEST}"))?;
-    fs::set_permissions(RECOVERY_MANIFEST, std::os::unix::fs::PermissionsExt::from_mode(0o644))
-        .with_context(|| format!("let every user read {RECOVERY_MANIFEST}"))?;
-    // The directory turns itself off when it cannot find its own
-    // description, and a run of it before this was written may have left
-    // that behind.
-    skyward_sys::set_prop(DIRECTORY_OFF, "false")?;
     Ok(())
 }
 

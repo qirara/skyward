@@ -862,6 +862,7 @@ mod tests {
         assert_eq!((cfg.device.codename.as_str(), cfg.device.ab), ("p3q", false));
         assert!(cfg.base.third_party && !cfg.base.mtp, "OrangeFox's, keeping adb alone");
         assert_eq!(cfg.base.partition_size, Some(81_788_928), "its recovery partition is 78 MiB");
+        assert!(cfg.base.sha256.is_some(), "the base it is built on is named by its SHA-256");
         assert!(cfg.stock.is_none() && cfg.update.is_none(), "no stock build the recovery is made on, and no update server it knows");
         let timed = cfg.haptics.expect("the S21 Ultra has a motor").timed.expect("played by its length");
         assert_eq!((timed.intensity_max, timed.click), (Some(10000), 30));

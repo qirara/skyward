@@ -71,7 +71,7 @@
 
 ## 三、构建和刷入
 
-1. 准备基底：p3q 的 OrangeFox 或 TWRP `recovery.img`（recovery 分区的内容）。算出 SHA-256，写进 `devices/p3q.toml` 的 `[base] sha256`。
+1. 准备基底：p3q 的 OrangeFox 或 TWRP `recovery.img`（recovery 分区的内容）。算出 SHA-256，写进 `devices/p3q.toml` 的 `[base] sha256`。现在写在里面的是下面“编译 OrangeFox 基底”得到的镜像；换用别的基底时改成那份镜像的值。
 2. 准备附加文件（目录结构就是它们在 ramdisk 中的位置）：
    - `lib/modules/dhd.ko` 和对应的 `lib/modules/modules.dep`（按上面的建议自己编译）；
    - `system/etc/wifi/bcmdhd_sta.bin`、`bcmdhd_clm.blob`、`nvram_net.txt`，来自原厂 vendor 分区的 `etc/wifi`；
@@ -80,9 +80,21 @@
 3. 本地构建见 README 的“构建在第三方 recovery 上”。用 CI 的话，在仓库里建一个标签为 `base-images` 的 Release，上传 `p3q-recovery.img` 和 `p3q-files.zip`，并提交 `devices/p3q.files.sha256`（在 zip 解压出的目录里运行 `sha256sum <每个文件>` 的输出）。
 4. 刷入：Odin 取消 Auto Reboot，`.tar.md5` 放 AP 栏，第一次同时把关闭校验的 vbmeta 放 USERDATA 栏；刷完直接按键进入 recovery，因为原厂系统启动时会把 recovery 改回原厂的。
 
+### 编译 OrangeFox 基底
+
+`devices/p3q.toml` 固定的基底 `OrangeFox-R12.0-Unofficial-p3q.img`（SHA-256 `5d8083ac7805df7241beb91cdee016b99b5a969c5807c4d23ceba1777be8e31c`）是这样编译的：
+
+- **源码**：按 OrangeFox 官方 sync 脚本（`gitlab.com/OrangeFox/sync`）对 14.1 的步骤：`repo init --depth=1 -u https://github.com/nebrassy/platform_manifest_twrp_aosp.git -b twrp-14`（AOSP `android-14.0.0_r67`），打上脚本自带的四个补丁，同步 `external/guava`、`external/gflags`、`hardware/google/interfaces`、`hardware/google/pixel`，再克隆 OrangeFox 的 `system/update_engine`、`external/se_omapi`（`fox_14.1`）、`bootable/recovery`（`fox_14.1`，`1d94174`）和 `vendor/recovery`（`main`，`1998cfc`）。
+- **设备树**：[yanzihan/android_device_samsung_p3q-fox-14.1](https://github.com/yanzihan/android_device_samsung_p3q-fox-14.1) 的 `bb194c2`，放在 `device/samsung/p3q`。它的 `prebuilt/Image.gz` 是三星原厂内核 `5.4.274-qgki-2370012-abG9980ZCSDHYF2`（三星编译服务器 `dpi@21DK7915` 编译，SHA-256 `7ea3b698…`，没有 KernelSU），触摸模块的 vermagic 与它一致。设备树里的脚本、init 文件和 fstab 都看过，没有联网或可疑的命令。只改了三处：删掉 `vendorsetup.sh` 里指向作者本机的 `FOX_USE_SPECIFIC_MAGISK_ZIP`（OrangeFox 改用自带的 Magisk，它只进安装 zip，不进 `recovery.img`），维护者 `OF_MAINTAINER` 和 `TW_DEVICE_VERSION` 改成中性的名字。
+- **编译**：`export ALLOW_MISSING_DEPENDENCIES=true FOX_BUILD_DEVICE=p3q LC_ALL=C`，`source build/envsetup.sh`，`lunch twrp_p3q-ap2a-eng`（Android 14 QPR 的 lunch 要带 release，这棵树里只有 `ap2a`），`mka adbd recoveryimage`。
+- **内存不到 16 GB 时**：Android 14 的 soong 分析在 15 GB 内存上会被 OOM 杀掉，这台构建机上做了两件只影响编译环境、不影响镜像内容的事。一是在 `build/blueprint/bootstrap/command.go` 给 `soong_build` 加 `debug.SetMemoryLimit(11 << 30)`（它在 `env -i` 下运行，`GOMEMLIMIT` 传不进去）。二是在 recovery 用不到的目录里放 `.find-ignore`，让 soong 不分析它们：`cts`、`development`（`development/sdk` 除外）、`test`（`test/app_compat` 除外，里面有 `csuite_test` 插件）、`external/noto-fonts`、`external/cronet`、`tools/` 下的测试工具、Java/应用类的主线模块，以及名为 `tests`、`test`、`vts` 的目录。下面这些被其他模块用到，必须保留：`packages/modules/Media`、`external/avb/test`、ART 的测试目录、`system/sepolicy/tests`（`fc_sort`）、`test/vts-testcase/hal/treble/vintf/libvts_vintf_test_common`、`packages/modules/Connectivity/staticlibs/netd/libnetdutils` 和 `.../staticlibs/native/bpf_headers`。磁盘不够时还删了用不到的预编译件：另外四个 clang 版本、rust 的 1.73/1.74、macOS/musl/Windows 版本、ABI dump、VNDK 快照、JDK 11/21。
+- **检验**：镜像是 boot header v2，大小正好是 recovery 分区（81788928 字节），末尾有 AVB footer；里面的内核与设备树的原厂内核逐字节相同。用它和 `devices/p3q.toml` 打包 Skyward 成功，镜像内容 72.0 MB，还剩 9.8 MB 放 WLAN 驱动、固件和库。同时得到的还有 Odin 用的 `OrangeFox-R12.0-Unofficial-p3q.img.tar` 和 OrangeFox 的安装 zip。
+
 ## 四、没有验证的部分
 
 本移植没有在真机上运行过，下面这些需要在手机上确认：
+
+- OrangeFox 基底本身也没有在手机上启动过：先单独刷入它，确认能进入 OrangeFox、触摸和 adb 正常，再刷构建在它上面的 Skyward。
 
 - 显示密度按同分辨率、尺寸相近的小米 13 Ultra 取 560，没有设置圆角半径。
 - WLAN：`dhd.ko` 如果按 `DHD_LINUX_STD_FW_API` 编译（PCIe 默认如此），会通过内核的固件加载器请求 `bcmdhd_sta.bin`、`nvram.txt`、`bcmdhd_clm.blob`；如果 `dmesg` 里有 `request_firmware` 失败，就在 `[wlan]` 里用 `firmware` 把这些名字映射到 `system/etc/wifi` 下的文件。

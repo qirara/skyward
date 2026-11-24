@@ -92,10 +92,11 @@ logs = [
 ]
 
 # Samsung's own recovery does not start Skyward on this phone, so it is
-# built on a recovery of another make for it, OrangeFox's or TWRP's, as a
-# raw image of the partition's contents: the one the configuration was made
-# on is named by its SHA-256 below, which the builder fills in for the
-# image it builds on.
+# built on a recovery of another make for it, as a raw image of the
+# partition's contents, named by its SHA-256 below: OrangeFox R12.0,
+# fox_14.1, built on Samsung's stock kernel of G9980ZCSDHYF2 as
+# docs/samsung-p3q.zh-CN.md tells. Building on another image means naming
+# that one's here.
 [base]
 third_party = true
 # 78 MiB.
@@ -105,4 +106,4 @@ partition_size = 81788928
 drop = ["twres/fonts/wqy-microhei.ttf"]
 # The base sets its USB port up with rules of its own, and keeps adb alone.
 mtp = false
-# sha256 = "<the base image's SHA-256, in lowercase hex>"
+sha256 = "5d8083ac7805df7241beb91cdee016b99b5a969c5807c4d23ceba1777be8e31c"

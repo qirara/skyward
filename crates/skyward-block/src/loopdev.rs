@@ -15,6 +15,8 @@ mod android {
 
     const GET_FREE: u32 = 0x4C82;
     const CONFIGURE: u32 = 0x4C0A;
+    const GET_STATUS64: u32 = 0x4C05;
+    const CLEAR_FD: u32 = 0x4C01;
 
     /// The device only ever reads. It stays pointed at the file until the
     /// recovery ends, which is as long as anything mounted from it lasts.
@@ -72,6 +74,49 @@ mod android {
             return Err(std::io::Error::last_os_error()).with_context(|| format!("point {} at {}", path.display(), file.display()));
         }
         Ok(path)
+    }
+
+    /// The loop devices, by their nodes, whose backing file lies on the
+    /// filesystem of the block device `device`: whatever path the file was
+    /// opened by, and in whichever mount namespace, the kernel says which
+    /// device holds it.
+    pub fn backed_by(device: (u32, u32)) -> Result<Vec<PathBuf>> {
+        let wanted = libc::makedev(device.0, device.1) as u64;
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir("/sys/block").context("read /sys/block")? {
+            let entry = entry.context("read /sys/block")?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(number) = name.strip_prefix("loop").and_then(|n| n.parse::<u32>().ok()) else { continue };
+            // A loop device pointed at nothing has no such folder.
+            if !entry.path().join("loop").exists() {
+                continue;
+            }
+            let Ok(node) = free_device(number) else { continue };
+            let Ok(file) = File::open(&node) else { continue };
+            let mut info: Info = unsafe { std::mem::zeroed() };
+            if unsafe { libc::ioctl(file.as_raw_fd(), GET_STATUS64 as libc::Ioctl, &mut info) } < 0 {
+                continue;
+            }
+            if info.device == wanted {
+                found.push(node);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Let the loop device at `node` go: pointed at nothing at once where
+    /// nothing has it open, and otherwise as soon as the last user lets it
+    /// go, its backing file with it.
+    pub fn clear(node: &Path) -> Result<()> {
+        let file = File::open(node).with_context(|| format!("open {}", node.display()))?;
+        if unsafe { libc::ioctl(file.as_raw_fd(), CLEAR_FD as libc::Ioctl, 0) } < 0 {
+            let e = std::io::Error::last_os_error();
+            // One pointed at nothing already has nothing to let go.
+            if e.raw_os_error() != Some(libc::ENXIO) {
+                return Err(e).with_context(|| format!("let {} go", node.display()));
+            }
+        }
+        Ok(())
     }
 
     /// Where the kernel put the loop device it just handed out: Android

@@ -788,15 +788,15 @@ pub fn partition_role(l: Lang, partition: &FlashTarget) -> &'static str {
     l.pick(match (partition.place, partition.name.as_str()) {
         (FlashPlace::Logical, _) => role::LOGICAL,
         (FlashPlace::Single, _) => role::WHOLE_SUPER,
-        (FlashPlace::Slotted, "boot") => role::BOOT,
-        (FlashPlace::Slotted, "init_boot") => role::INIT_BOOT,
-        (FlashPlace::Slotted, "recovery") => role::RECOVERY,
-        (FlashPlace::Slotted, "vendor_boot") => role::VENDOR_BOOT,
-        (FlashPlace::Slotted, "dtbo") => role::DTBO,
-        (FlashPlace::Slotted, "vbmeta") => role::VBMETA,
-        (FlashPlace::Slotted, "vbmeta_system") => role::VBMETA_SYSTEM,
-        (FlashPlace::Slotted, "vbmeta_vendor") => role::VBMETA_VENDOR,
-        (FlashPlace::Slotted, _) => role::PARTITION,
+        (FlashPlace::Slotted | FlashPlace::Only, "boot") => role::BOOT,
+        (FlashPlace::Slotted | FlashPlace::Only, "init_boot") => role::INIT_BOOT,
+        (FlashPlace::Slotted | FlashPlace::Only, "recovery") => role::RECOVERY,
+        (FlashPlace::Slotted | FlashPlace::Only, "vendor_boot") => role::VENDOR_BOOT,
+        (FlashPlace::Slotted | FlashPlace::Only, "dtbo") => role::DTBO,
+        (FlashPlace::Slotted | FlashPlace::Only, "vbmeta") => role::VBMETA,
+        (FlashPlace::Slotted | FlashPlace::Only, "vbmeta_system") => role::VBMETA_SYSTEM,
+        (FlashPlace::Slotted | FlashPlace::Only, "vbmeta_vendor") => role::VBMETA_VENDOR,
+        (FlashPlace::Slotted | FlashPlace::Only, _) => role::PARTITION,
     })
 }
 

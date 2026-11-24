@@ -1087,7 +1087,9 @@ pub fn installing(cx: &Ctx) -> Frame {
                     let title = pick_title(l, Pick::Current, i.slot);
                     widgets::list(&mut c, t, f, y, &[Row::new(&title).trail(Trail::Check(true))]).bottom
                 }
-                FlashPlace::Single => parts.bottom,
+                // A partition the phone has once, being without slots, goes
+                // where it is, with nothing to pick.
+                FlashPlace::Single | FlashPlace::Only => parts.bottom,
             };
             let (label, danger) = confirm_label(Confirm::Flash, cx.state);
             let track = widgets::confirm(&mut c, t, f, bottom + t.m.dp(28.0), label, danger, s.confirm);

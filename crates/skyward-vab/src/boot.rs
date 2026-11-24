@@ -55,6 +55,16 @@ pub enum BootControl<'a> {
     Older(Handle<'a>),
 }
 
+/// The slot that starts next: the one the boot control says, or on a phone
+/// without slots, which has no boot control, its one set of partitions,
+/// slot A's here.
+pub fn starting_next() -> Result<Slot> {
+    match crate::current_slot()? {
+        Some(_) => next_slot(),
+        None => Ok(Slot::A),
+    }
+}
+
 /// The slot the bootloader starts next, as the running boot control tells
 /// it.
 pub fn next_slot() -> Result<Slot> {

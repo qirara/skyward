@@ -408,9 +408,27 @@ pub fn device_config<R: Read + Seek>(file: &mut R) -> Result<Option<Vec<u8>>> {
     find(ramdisk, |name| name == skyward_config::ramdisk::CONFIG, read).context("read the ramdisk")
 }
 
-/// The partition `name` of `slot` among the links in `dir`.
+/// The partition `name` of `slot` among the links in `dir`: the slot's own,
+/// or on a phone without slots, which has it once, the one of that name,
+/// which both slots name here.
 pub fn device(dir: &Path, name: &str, slot: Slot) -> PathBuf {
-    dir.join(format!("{name}{}", slot.suffix()))
+    let slotted = dir.join(format!("{name}{}", slot.suffix()));
+    let plain = dir.join(name);
+    let either = [Slot::A, Slot::B].iter().any(|s| dir.join(format!("{name}{}", s.suffix())).exists());
+    match !either && plain.exists() {
+        true => plain,
+        false => slotted,
+    }
+}
+
+/// Whether `name` is a partition only the phone itself writes, which no
+/// image is offered to: its identity and calibration, the baseband's
+/// settings with the IMEI among them as Samsung's EFS, its data, super,
+/// which takes only a whole super's image, and its disks whole.
+fn kept(name: &str) -> bool {
+    const OWN: [&str; 10] = ["efs", "sec_efs", "persist", "modemst1", "modemst2", "fsg", "fsc", "userdata", "metadata", SUPER];
+    let disk = |prefix: &str, rest: fn(&str) -> bool| name.strip_prefix(prefix).is_some_and(|r| !r.is_empty() && rest(r));
+    OWN.contains(&name) || disk("sd", |r| r.bytes().all(|b| b.is_ascii_lowercase())) || disk("mmcblk", |r| r.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Where a partition an image can go to is.
@@ -422,6 +440,10 @@ pub enum Place {
     Single,
     /// A logical partition in super, of the slot the phone runs from.
     Logical,
+    /// A partition a phone without slots has once, where one with slots has
+    /// one in each, such as its boot and recovery partitions: written as it
+    /// lies, as either of a pair is.
+    Only,
 }
 
 /// A partition an image can go to, by its name without a slot's suffix.
@@ -451,19 +473,38 @@ pub fn named(file_name: &str) -> &str {
 pub fn targets(kind: ImageKind, named: Option<&str>, dir: &Path, logical: &[String]) -> Result<Vec<Target>> {
     let slotted = |name: &str| -> Result<bool> {
         for slot in [Slot::A, Slot::B] {
-            let path = device(dir, name, slot);
+            let path = dir.join(format!("{name}{}", slot.suffix()));
             if !path.try_exists().with_context(|| format!("look for {}", path.display()))? {
                 return Ok(false);
             }
         }
         Ok(true)
     };
+    // A phone without slots names none of its partitions after a slot, and
+    // has each of these once, by its own name. What only the phone itself
+    // writes, its identity and calibration, its data and its disks whole,
+    // is not among them, as a phone with slots has those once too.
+    let unslotted = !std::fs::read_dir(dir)
+        .with_context(|| format!("read {}", dir.display()))?
+        .flatten()
+        .any(|e| [Slot::A, Slot::B].iter().any(|slot| e.file_name().to_string_lossy().ends_with(slot.suffix())));
+    let only = |name: &str| -> Result<bool> {
+        let path = dir.join(name);
+        Ok(unslotted && !kept(name) && path.try_exists().with_context(|| format!("look for {}", path.display()))?)
+    };
+    let pair_or_only = |name: &str| -> Result<Option<Place>> {
+        Ok(match (slotted(name)?, only(name)?) {
+            (true, _) => Some(Place::Slotted),
+            (false, true) => Some(Place::Only),
+            (false, false) => None,
+        })
+    };
     let mut found: Vec<Target> = Vec::new();
     match kind {
         ImageKind::Boot { .. } | ImageKind::VendorBoot | ImageKind::Dtbo | ImageKind::Vbmeta => {
             for name in kind.partitions() {
-                if slotted(name)? {
-                    found.push(Target { name: name.to_string(), place: Place::Slotted });
+                if let Some(place) = pair_or_only(name)? {
+                    found.push(Target { name: name.to_string(), place });
                 }
             }
             if let Some(first) = named.and_then(|named| found.iter().position(|t| t.name == named)) {
@@ -478,8 +519,8 @@ pub fn targets(kind: ImageKind, named: Option<&str>, dir: &Path, logical: &[Stri
         }
         ImageKind::Filesystem(_) | ImageKind::Other => {
             if let Some(named) = named {
-                if slotted(named)? {
-                    found.push(Target { name: named.to_string(), place: Place::Slotted });
+                if let Some(place) = pair_or_only(named)? {
+                    found.push(Target { name: named.to_string(), place });
                 } else if logical.iter().any(|name| name == named) {
                     found.push(Target { name: named.to_string(), place: Place::Logical });
                 }
@@ -939,6 +980,34 @@ mod tests {
         assert_eq!(names(&of(ImageKind::Super, Some("vendor"))), [("super", Place::Single)]);
         let none = phone(&["boot_a", "boot_b"]);
         assert!(targets(ImageKind::Super, None, none.path(), &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_slots_partition_is_its_own_or_the_one_a_phone_without_slots_has() {
+        let ab = phone(&["recovery_a", "recovery_b", "boot"]);
+        assert_eq!(device(ab.path(), "recovery", Slot::B), ab.path().join("recovery_b"));
+        assert_eq!(device(ab.path(), "dtbo", Slot::A), ab.path().join("dtbo_a"), "a partition it lacks is named as a slot's");
+        let only = phone(&["recovery"]);
+        assert_eq!(device(only.path(), "recovery", Slot::A), only.path().join("recovery"));
+        assert_eq!(device(only.path(), "recovery", Slot::B), only.path().join("recovery"), "both slots name the one");
+    }
+
+    #[test]
+    fn a_phone_without_slots_is_offered_the_one_partition_of_each_name() {
+        let dir = phone(&["boot", "recovery", "vbmeta", "dtbo", "efs", "modem", "userdata", "super", "sda", "mmcblk0"]);
+        let logical: Vec<String> = ["system", "vendor"].map(String::from).to_vec();
+        let of = |kind, named| targets(kind, named, dir.path(), &logical).unwrap();
+        let both = ImageKind::Boot { kernel: true, ramdisk: Ramdisk::Recovery };
+        assert_eq!(names(&of(both, Some("boot"))), [("boot", Place::Only), ("recovery", Place::Only)]);
+        assert_eq!(names(&of(ImageKind::Vbmeta, None)), [("vbmeta", Place::Only)]);
+        assert_eq!(names(&of(ImageKind::Other, Some("modem"))), [("modem", Place::Only)], "named after a partition it has once");
+        for own in ["efs", "userdata", "super", "sda", "mmcblk0"] {
+            assert!(of(ImageKind::Other, Some(own)).is_empty(), "{own} is the phone's own to keep");
+        }
+        assert_eq!(names(&of(ImageKind::Other, Some("system"))), [("system", Place::Logical)]);
+        assert_eq!(names(&of(ImageKind::Super, None)), [("super", Place::Single)]);
+        let slotted = phone(&["boot_a", "boot_b", "dtbo"]);
+        assert!(targets(ImageKind::Dtbo, None, slotted.path(), &[]).unwrap().is_empty(), "a phone with slots keeps what it has once");
     }
 
     /// A partition of `size` bytes filled with 0xAA, so untouched bytes

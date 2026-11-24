@@ -50,7 +50,13 @@ impl Kept {
     pub fn wanted(&self, next: Slot) -> Result<Vec<Slot>> {
         let (a, _) = read(&image::device(&self.dir, PARTITION, Slot::A))?;
         let (b, _) = read(&image::device(&self.dir, PARTITION, Slot::B))?;
-        Ok(restore(self.before, [a, b], self.own, next))
+        let mut slots = restore(self.before, [a, b], self.own, next);
+        // A phone without slots has the one recovery partition, which both
+        // slots name, and it is written once.
+        if image::device(&self.dir, PARTITION, Slot::A) == image::device(&self.dir, PARTITION, Slot::B) {
+            slots.truncate(1);
+        }
+        Ok(slots)
     }
 
     /// Write this recovery into the recovery partitions of `slots` and read

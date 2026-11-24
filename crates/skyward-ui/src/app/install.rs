@@ -52,7 +52,7 @@ impl Pick {
     /// partition, and none where the phone has it once.
     pub fn slots(self, place: FlashPlace, current: Slot) -> Vec<Slot> {
         match (place, self) {
-            (FlashPlace::Single, _) => Vec::new(),
+            (FlashPlace::Single | FlashPlace::Only, _) => Vec::new(),
             (FlashPlace::Logical, _) | (FlashPlace::Slotted, Pick::Current) => vec![current],
             (FlashPlace::Slotted, Pick::Other) => vec![current.other()],
             (FlashPlace::Slotted, Pick::Both) => vec![Slot::A, Slot::B],

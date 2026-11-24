@@ -38,8 +38,15 @@ pub fn check(image: &[u8], codename: &str) -> Result<()> {
 /// any other whose partition holds Skyward now, any build of it.
 pub fn slots(dir: &Path, next: Slot) -> Result<Vec<Slot>> {
     let mut slots = Vec::new();
+    let mut seen = Vec::new();
     for slot in [Slot::A, Slot::B] {
         let path = image::device(dir, PARTITION, slot);
+        // A phone without slots has its one recovery partition, which both
+        // slots name, written once.
+        if seen.contains(&path) {
+            continue;
+        }
+        seen.push(path.clone());
         let mut file = File::open(&path).with_context(|| format!("open {}", path.display()))?;
         image::drop_cache(&file).with_context(|| format!("drop the cached pages of {}", path.display()))?;
         if slot == next || image::is_skyward(&mut file).with_context(|| format!("look into {}", path.display()))? {
@@ -116,6 +123,13 @@ mod tests {
         assert_eq!(slots(partitions(&skyward, &skyward, size).path(), Slot::A).unwrap(), [Slot::A, Slot::B], "an older build in the other slot");
         assert_eq!(slots(partitions(&stock, &skyward, size).path(), Slot::A).unwrap(), [Slot::A, Slot::B], "Skyward started without being flashed");
         assert_eq!(slots(partitions(&stock, &stock, size).path(), Slot::B).unwrap(), [Slot::B]);
+    }
+
+    #[test]
+    fn a_phone_without_slots_has_its_one_recovery_partition_written_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("recovery"), recovery(false)).unwrap();
+        assert_eq!(slots(dir.path(), Slot::A).unwrap(), [Slot::A], "the one partition, not both slots' names for it");
     }
 
     #[test]

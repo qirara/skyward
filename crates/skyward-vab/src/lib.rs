@@ -14,6 +14,8 @@ pub use partitions::{
     remake, settle, slot_bases, slot_names, slot_sizes, snapshots_mapped, start_merge, unmap_slot, unmap_whole, unmount_one,
     unmount_partitions, Mounted, Mounts, Remade, SlotMaps, Whole,
 };
+#[cfg(target_os = "android")]
+pub use partitions::free_partitions;
 pub use snapshots::Merge;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +80,23 @@ pub fn current_slot() -> Result<Option<Slot>> {
         None => Ok(None),
         Some(s) => Slot::from_suffix(&s).map(Some).ok_or_else(|| anyhow!("slot suffix {s:?}")),
     }
+}
+
+/// The slot the phone's partitions are read and written in: the one it
+/// started from, or on a phone that is not A/B, A, the name its one set of
+/// partitions goes by here; [`partition_name`] names those with no suffix.
+pub fn booted_slot() -> Result<Slot> {
+    Ok(current_slot()?.unwrap_or(Slot::A))
+}
+
+/// The name the partition `base` of `slot` goes by on this phone: with the
+/// slot's suffix on a phone with slots, and bare on one without, as Android
+/// names them by the suffix the bootloader gives, or its want of one.
+pub fn partition_name(base: &str, slot: Slot) -> Result<String> {
+    Ok(match current_slot()? {
+        Some(_) => format!("{base}{}", slot.suffix()),
+        None => base.to_string(),
+    })
 }
 
 /// Virtual A/B update phase as libsnapshot records it. Anything but `None`

@@ -243,10 +243,8 @@ impl SystemProps {
         if !skyward_config::ramdisk::in_recovery() {
             return Ok(SystemProps::Running);
         }
-        let read = match skyward_vab::current_slot()? {
-            Some(slot) => installed_props(slot),
-            None => Ok(HashMap::new()),
-        };
+        // A phone without slots keeps its one set of partitions as slot A's.
+        let read = installed_props(skyward_vab::booted_slot()?);
         let why = read.as_ref().err().map(|e| format!("{e:#}"));
         if PROPS_UNREAD.lock().expect("nothing panics while it is held").untold(why.as_deref()) {
             skyward_sys::kmsg(&format!("the installed system's properties could not be read, and the phone's details go without them: {}", why.unwrap_or_default()))?;
@@ -277,7 +275,8 @@ const BOOT_PROPS: &str = "ro.boot.";
 /// they come first here too, the same in a recovery as in the system.
 pub fn installed_props(slot: Slot) -> Result<HashMap<String, String>> {
     let base = |m: &skyward_vab::Mounted| -> String {
-        m.partition.strip_suffix(slot.suffix()).expect("mounted partitions carry the slot suffix").to_string()
+        // A phone without slots names its partitions without a suffix.
+        m.partition.strip_suffix(slot.suffix()).unwrap_or(&m.partition).to_string()
     };
     let mut parts = skyward_vab::mounted_partitions(slot)?;
     parts.sort_by_key(|m| PROP_ORDER.iter().position(|b| *b == base(m)).unwrap_or(PROP_ORDER.len()));
@@ -436,6 +435,9 @@ fn battery(root: &Path) -> Result<Option<Battery>> {
         "Unknown" => Charge::Unknown,
         other => bail!("{}: status {other:?}", dir.display()),
     };
+    // A battery charging is powered by something, where no supply says it
+    // is online, as a Samsung phone's charger does not.
+    let plugged = plugged || charge == Charge::Charging;
     Ok(Some(Battery {
         level: parse(&read(dir.join("capacity"))?, "capacity")?,
         charge,
@@ -466,7 +468,9 @@ fn online(dir: &Path) -> Result<bool> {
 fn said_online(read: std::io::Result<String>) -> std::io::Result<bool> {
     match read {
         Ok(s) => Ok(s.trim() == "1"),
-        Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::WouldBlock) => Ok(false),
+        // A supply that cannot tell yet, as Samsung's fuel gauge answers
+        // EINVAL, is taken as offline and asked again at the next reading.
+        Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::WouldBlock | ErrorKind::InvalidInput) => Ok(false),
         Err(e) => Err(e),
     }
 }

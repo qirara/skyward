@@ -471,7 +471,7 @@ fn install_system(ctx: &Context, contents: &skyward_systems::package::Contents) 
     if let Some(other) = skyward_systems::install::state()?.system {
         return refused(Refusal::SystemInstalled(other.name));
     }
-    let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
+    let slot = skyward_vab::current_slot()?.context("a phone without slots holds one system, and has no slot to install a second one in")?;
     let room = skyward_systems::install::room_now(slot)?;
     let sizes = skyward_systems::install::sizes(contents.least(), room);
     if sizes.is_empty() {
@@ -563,7 +563,7 @@ fn describe(package: &Package) -> String {
 }
 
 fn update_system<S>(ctx: &mut Context, mount: &Mount<S>, update: &Update) -> Result<Done> {
-    let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
+    let slot = skyward_vab::current_slot()?.context("the package is an update for phones with slots, and this phone has none")?;
     if let Err(refusal) = package::check(update, &phone(slot)?) {
         return Ok(Done::Decided(Outcome::Refused(refusal)));
     }
@@ -798,7 +798,8 @@ fn lines(from: impl Read, mut each: impl FnMut(&str) -> io::Result<()>) -> io::R
 /// they are.
 fn flash_image(ctx: &mut Context, image: &Image, file_name: Option<&str>) -> Result<Done> {
     let dir = Path::new(skyward_block::BY_NAME);
-    let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
+    // A phone without slots keeps its logical partitions as slot A's.
+    let slot = skyward_vab::booted_slot()?;
     // A super that does not read lists no partition to write into.
     let logical = skyward_vab::slot_names(slot).unwrap_or_else(|e| {
         let _ = kmsg(&format!("install: super lists no logical partitions: {e:#}"));
@@ -806,7 +807,8 @@ fn flash_image(ctx: &mut Context, image: &Image, file_name: Option<&str>) -> Res
     });
     let all = image::targets(image.kind, file_name.map(image::named), dir, &logical)?;
     let state = skyward_vab::snapshot_state()?;
-    let partitions: Vec<Target> = all.iter().filter(|t| state == SnapshotState::None || t.place == Place::Slotted).cloned().collect();
+    let partitions: Vec<Target> =
+        all.iter().filter(|t| state == SnapshotState::None || matches!(t.place, Place::Slotted | Place::Only)).cloned().collect();
     if partitions.is_empty() {
         let refusal = match image.kind {
             _ if !all.is_empty() => Refusal::Pending(state),
@@ -832,6 +834,13 @@ fn flash_image(ctx: &mut Context, image: &Image, file_name: Option<&str>) -> Res
             }
             let devices: Vec<_> = slots.iter().map(|&slot| image::device(dir, &partition, slot)).collect();
             write_unmounted(ctx, &mut file, layout, &devices)?;
+        }
+        Place::Only => {
+            ensure!(slots.is_empty(), "{partition} is in no slot, and was sent to {slots:?}");
+            if [skyward_systems::store::BOOT, skyward_systems::store::INIT_BOOT].contains(&partition.as_str()) {
+                installed_boot_set()?;
+            }
+            write_unmounted(ctx, &mut file, layout, &[dir.join(&partition)])?;
         }
         Place::Single => {
             ensure!(slots.is_empty(), "{partition} is in no slot, and was sent to {slots:?}");
@@ -940,7 +949,9 @@ fn run_script(ctx: &mut Context, size: u64) -> Result<Done> {
             Ok(other) => bail!("a script waiting to be agreed to was told {other:?}"),
         }
     }
-    let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
+    // A phone without slots runs its scripts on its one set of partitions,
+    // slot A's here.
+    let slot = skyward_vab::booted_slot()?;
     extract_script()?;
     shell_at_sbin()?;
     let kept = hold(ctx, slot)?;
@@ -964,7 +975,7 @@ fn run_script(ctx: &mut Context, size: u64) -> Result<Done> {
     // the recovery of the slot that starts next, which a package that
     // installs to the other slot switches to.
     if let Some(kept) = &kept {
-        reflash(ctx, kept, skyward_vab::boot::next_slot().context("ask which slot starts next"));
+        reflash(ctx, kept, skyward_vab::boot::starting_next().context("ask which slot starts next"));
     }
     let (code, wipe_cache) = ran?;
     Ok(Done::Script { code, wipe_cache })

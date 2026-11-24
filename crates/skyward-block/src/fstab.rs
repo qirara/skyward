@@ -4,8 +4,33 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Where the phone's own partitions keep the table.
+/// Where the phone's own partitions keep the table, as Qualcomm's phones
+/// name it.
 pub const FILES: [&str; 2] = ["/vendor/etc/fstab.qcom", "/odm/etc/fstab.qcom"];
+
+/// What the bootloader calls the table, as Android's init looks for it:
+/// fstab.<suffix> in the odm and the vendor partition, the suffix being the
+/// first of these the bootloader gives, as Samsung's gives `default`.
+const NAMED_BY: [&str; 3] = ["androidboot.fstab_suffix", "androidboot.hardware", "androidboot.hardware.platform"];
+
+/// Every place the phone may keep its table, in the order they are read:
+/// [`FILES`], then those the bootloader's names give.
+fn files() -> Vec<String> {
+    let mut out: Vec<String> = FILES.iter().map(|f| f.to_string()).collect();
+    for key in NAMED_BY {
+        let Ok(Some(suffix)) = crate::boot_param(key) else { continue };
+        if suffix.contains('/') {
+            continue;
+        }
+        for dir in ["/odm/etc", "/vendor/etc"] {
+            let file = format!("{dir}/fstab.{suffix}");
+            if !out.contains(&file) {
+                out.push(file);
+            }
+        }
+    }
+    out
+}
 
 /// One filesystem the phone knows about.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,8 +79,8 @@ pub fn entries(text: &str) -> Vec<Entry> {
 /// Every entry of the phone's own table, read from wherever the table is.
 fn table() -> Result<Vec<Entry>> {
     let mut out = Vec::new();
-    for file in FILES {
-        let text = match std::fs::read_to_string(file) {
+    for file in files() {
+        let text = match std::fs::read_to_string(&file) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e).with_context(|| format!("read {file}")),
@@ -110,7 +135,19 @@ pub fn mount(name: &str) -> Result<PathBuf> {
         return Ok(at);
     }
     std::fs::create_dir_all(&at).with_context(|| format!("make {}", at.display()))?;
-    crate::mount::mount(Path::new(&device(&entry)?), &at, &entry.filesystem, &entry.options)?;
+    let device = device(&entry)?;
+    if let Err(e) = crate::mount::mount(Path::new(&device), &at, &entry.filesystem, &entry.options) {
+        // The label the table gives the files may be one the recovery's own
+        // policy does not know, as a recovery of another make's may not, and
+        // the kernel then turns the mount down whole; the recovery's programs
+        // read them as root, labelled or not.
+        let unlabelled: Vec<String> = entry.options.iter().filter(|o| !o.starts_with("context=")).cloned().collect();
+        if unlabelled.len() == entry.options.len() {
+            return Err(e);
+        }
+        crate::mount::mount(Path::new(&device), &at, &entry.filesystem, &unlabelled)
+            .with_context(|| format!("mount {device} on {} without the label its table gives it, as with it: {e:#}", at.display()))?;
+    }
     Ok(at)
 }
 

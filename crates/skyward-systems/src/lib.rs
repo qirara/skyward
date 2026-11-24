@@ -53,10 +53,17 @@ pub struct Other {
 /// the major version Xiaomi gives it, any other by its Android version;
 /// with the build it is, where it says.
 pub fn installed_name(props: &HashMap<String, String>, version_prop: &str) -> Named {
-    let name = match (props.get("ro.mi.os.version.code"), props.get("ro.build.version.release")) {
-        (Some(code), _) => format!("HyperOS {code}"),
-        (None, Some(release)) => format!("Android {release}"),
-        (None, None) => "Android".into(),
+    // One UI writes its version as a number of the major, the minor and the
+    // patch's two digits each: 60100 for 6.1.
+    let one_ui = props.get("ro.build.version.oneui").and_then(|code| code.parse::<u32>().ok()).filter(|code| *code >= 10000);
+    let name = match (props.get("ro.mi.os.version.code"), one_ui, props.get("ro.build.version.release")) {
+        (Some(code), _, _) => format!("HyperOS {code}"),
+        (None, Some(code), _) => match code % 100 {
+            0 => format!("One UI {}.{}", code / 10000, code / 100 % 100),
+            patch => format!("One UI {}.{}.{patch}", code / 10000, code / 100 % 100),
+        },
+        (None, None, Some(release)) => format!("Android {release}"),
+        (None, None, None) => "Android".into(),
     };
     let version = props.get(version_prop).or_else(|| props.get("ro.build.display.id")).cloned();
     Named { name, version }
@@ -79,5 +86,10 @@ mod tests {
             installed_name(&custom, "ro.mi.os.version.incremental"),
             Named { name: "Android 16".into(), version: Some("lineage_ishtar-userdebug 16 BP2A".into()) }
         );
+        let one_ui = props(&[("ro.build.version.oneui", "60100"), ("ro.build.version.release", "14"), ("ro.build.display.id", "UP1A.231005.007.G9980ZHS6FXL1")]);
+        assert_eq!(installed_name(&one_ui, "ro.build.display.id"), Named { name: "One UI 6.1".into(), version: Some("UP1A.231005.007.G9980ZHS6FXL1".into()) });
+        assert_eq!(installed_name(&props(&[("ro.build.version.oneui", "50101")]), "ro.build.display.id").name, "One UI 5.1.1");
+        let odd = props(&[("ro.build.version.oneui", "beta"), ("ro.build.version.release", "14")]);
+        assert_eq!(installed_name(&odd, "ro.build.display.id").name, "Android 14", "a version that is no number says nothing");
     }
 }

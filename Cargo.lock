@@ -2837,6 +2837,7 @@ dependencies = [
  "skyward-binder",
  "skyward-block",
  "skyward-lp",
+ "skyward-sys",
 ]
 
 [[package]]

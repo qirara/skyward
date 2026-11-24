@@ -138,6 +138,21 @@ not been verified.
 | 🚧 REDMI K100 Pro | `athens` | OS4.0.4.0.XPICNXM (Android 17) |
 | 🚧 REDMI K100 Pro Max | `songyuan` | OS4.0.4.0.XGNCNXM (Android 17) |
 
+### 🚧 Samsung
+
+Samsung's own recovery does not start Skyward on this phone, so its image is built
+on a recovery of another make built for it, OrangeFox's or TWRP's: a base Samsung
+does not hand out, which whoever builds the image provides, and which the device
+file's `[base]` checks by its SHA-256. The phone has no slots and no fastboot, and
+is flashed with Odin or Heimdall. The configuration draws on the port in
+[yanzihan/Skyward-Galaxy](https://github.com/yanzihan/Skyward-Galaxy), and has not
+been tried on the phone; the port's notes and a security review of the repositories
+it draws on are in [docs/samsung-p3q.zh-CN.md](docs/samsung-p3q.zh-CN.md), in Chinese.
+
+| Device | Codename | Built on |
+| --- | --- | --- |
+| 🚧 Galaxy S21 Ultra 5G (Snapdragon) | `p3q` | OrangeFox or TWRP on the stock Android 11 vendor partition |
+
 ## Installing Skyward
 
 Skyward needs an unlocked bootloader. Download the zip for your phone from
@@ -156,6 +171,20 @@ Afterwards Skyward updates itself over Wi-Fi from its newest release, on the
 Skyward update page in Settings; a newer image, unzipped, also installs from its own
 Install page. With **Flash Skyward again** on, a system update or zip that writes
 over the recovery partitions gets Skyward back in them.
+
+Samsung's phones have no fastboot and are flashed in download mode. With OEM
+unlocking turned on in the developer options and the bootloader unlocked, turn off
+Auto Reboot in Odin, put the phone's `.tar.md5` from the release in the AP slot
+and, the first time, a vbmeta that turns verification off, such as the
+`vbmeta_disabled.tar` TWRP provides for the phone, in the USERDATA slot. Once it is
+flashed, hold Volume Down and Power until the screen goes black, then at once
+Volume Up and Power, to start recovery: the stock system puts the stock recovery
+back as it starts, from `recovery-from-boot.p` on the vendor partition, so Skyward
+is started first. With Heimdall, flash the image in the zip:
+
+```sh
+heimdall flash --RECOVERY skyward-v0.5.1-p3q-base-xxxxxxxxxxxx.img --no-reboot
+```
 
 adb in Skyward is a root shell that needs no authorization on the phone: anyone
 with the phone and a cable can reach its storage while it is in recovery.
@@ -253,6 +282,11 @@ target/release/skyward-pack recovery \
   --out target/skyward-nezha.img
 ```
 
+An update is looked for among the releases of the repository that builds Skyward,
+which `SKYWARD_RELEASES=<owner>/<name>` names as it is built, `kirklin/skyward`
+when it is not set. The workflow sets it to the repository it runs in, so that a
+fork's images update from the fork's own releases.
+
 Tests and lints run on the computer; what runs only on the phone is linted for it:
 
 ```sh
@@ -278,6 +312,50 @@ such as `en` or `zh-TW`:
 ```sh
 cargo run --release -p skyward-preview -- target/preview --lang en
 ```
+
+### Building on a recovery of another make
+
+A device whose `[base]` sets `third_party = true` is built on a recovery of another
+make: the base image is the recovery partition's contents, and `partition_size` the
+partition's size. The packer first checks the image against `sha256`, and stops on
+an image that holds no TWRP files, or that does while the configuration names a
+stock recovery. The base's files `drop` names are left out, its own recovery
+program gives way to Skyward, and programs it carries under the names install
+scripts look for become links to Skyward. Modules the base's kernel leaves out,
+firmware its drivers read and libraries its programs need go in with
+`--add-file <file on the computer>=<path in the ramdisk>`, never over a file the
+ramdisk holds. Given an RSA private key in PEM with `--avb-key`, the vbmeta at the
+end of the image is signed as avbtool signs one. A Samsung phone needs the tar Odin
+takes as well:
+
+```sh
+target/release/skyward-pack recovery \
+  --stock p3q-recovery.img \
+  --binary target/aarch64-linux-android/release/skyward \
+  --system-init target/system-init/aarch64-linux-android/release/system-init \
+  --config devices/p3q.toml \
+  --font resources/fonts/MiSansVF.ttf \
+  --mono resources/fonts/KirkMono-Regular.ttf \
+  --mono-license resources/fonts/KirkMono-OFL.txt \
+  --add-file files/lib/modules/dhd.ko=lib/modules/dhd.ko \
+  --add-file files/lib/modules/modules.dep=lib/modules/modules.dep \
+  --out target/skyward-p3q.img
+target/release/skyward-pack odin --image target/skyward-p3q.img --out target/skyward-p3q.tar.md5
+```
+
+The S21 Ultra's WLAN driver, `dhd.ko`, is built from the base kernel's own source
+with its configuration, for its version magic and symbol versions to match; the
+`bcmdhd_sta.bin`, `bcmdhd_clm.blob` and `nvram_net.txt` it reads come from the stock
+vendor partition's `etc/wifi`, and go in the ramdisk's `system/etc/wifi`.
+
+The workflow takes the base from the repository's own release tagged
+`base-images`: `<codename>-recovery.img`, and the files to add as
+`<codename>-files.zip`, each at its path in the ramdisk. The base is checked
+against the device file's `[base] sha256`, and the build stops where there is
+none; the files are checked against `devices/<codename>.files.sha256` in the
+repository, what `sha256sum` writes of them in the folder the zip unpacks to, and
+only those it names go into the image. A phone whose base `base-images` does not
+hold yet is passed over.
 
 ### Translations
 

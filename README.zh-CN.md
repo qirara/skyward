@@ -118,6 +118,14 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 | 🚧 REDMI K100 Pro | `athens` | OS4.0.4.0.XPICNXM（Android 17） |
 | 🚧 REDMI K100 Pro Max | `songyuan` | OS4.0.4.0.XGNCNXM（Android 17） |
 
+### 🚧 三星
+
+三星的 recovery 不能在这台手机上启动 Skyward，所以镜像构建在为它构建的第三方 recovery（OrangeFox 或 TWRP）之上：这份基底镜像不由三星分发，构建者自己提供，设备配置的 `[base]` 按 SHA-256 核对它。手机没有 A/B 槽位，不使用 fastboot，用 Odin 或 Heimdall 刷入。配置参考了 [yanzihan/Skyward-Galaxy](https://github.com/yanzihan/Skyward-Galaxy) 的移植，还没有在真机上验证；移植说明和对参考仓库的安全审计见 [docs/samsung-p3q.zh-CN.md](docs/samsung-p3q.zh-CN.md)。
+
+| 机型 | 代号 | 构建所用的基底 |
+| --- | --- | --- |
+| 🚧 Galaxy S21 Ultra 5G（骁龙） | `p3q` | 原厂 Android 11 vendor 上的 OrangeFox 或 TWRP recovery |
+
 ## 安装 Skyward
 
 Skyward 需要已解锁的 bootloader。从 [Releases](https://github.com/kirklin/skyward/releases) 下载对应机型的 zip，每个文件都标有机型和代号，例如 Xiaomi 17 Ultra (nezha)。使用 `SHA256SUMS` 核对并解压之后，在手机处于 fastboot 模式的时候，把其中的镜像刷入当前运行槽位的 recovery 分区：
@@ -129,6 +137,12 @@ fastboot reboot recovery
 ```
 
 之后连接 WLAN，就可以在“设置”的“Skyward 更新”页面更新到最新版本，也可以在 Skyward 自己的“安装”页面安装解压出来的新版镜像。打开 **自动重新刷入 Skyward** 之后，系统更新或者刷机包覆盖 recovery 分区的时候，Skyward 会重新刷回这些分区。
+
+三星手机没有 fastboot，在下载模式（Download mode）中刷入。先在开发者选项里打开 OEM 解锁并解锁 bootloader，然后在 Odin 里取消“Auto Reboot”，把 Release 中这台手机的 `.tar.md5` 放进 AP 栏，第一次刷入时把关闭校验的 vbmeta（例如 TWRP 为这台手机提供的 `vbmeta_disabled.tar`）放进 USERDATA 栏，刷入之后按住音量减和电源键直到黑屏，立即改按音量加和电源键进入 recovery。原厂系统启动时会用 vendor 分区里的 `recovery-from-boot.p` 把 recovery 改回原厂的，所以第一次要直接进入 Skyward。用 Heimdall 的话，刷入 zip 里的镜像：
+
+```sh
+heimdall flash --RECOVERY skyward-v0.5.1-p3q-base-xxxxxxxxxxxx.img --no-reboot
+```
 
 Skyward 中的 adb 是 root shell，手机上无需授权：手机处于 recovery 的时候，任何人拿到手机和数据线都能访问其中的存储。
 
@@ -186,6 +200,8 @@ target/release/skyward-pack recovery \
   --out target/skyward-nezha.img
 ```
 
+Skyward 在线更新时向 GitHub 询问的是构建它的仓库的最新版本：构建时用 `SKYWARD_RELEASES=<所有者>/<仓库>` 指定，没有指定时是 `kirklin/skyward`。本仓库的 CI 把它设为构建所在的仓库，所以 fork 构建的镜像只从这个 fork 自己的 Release 更新。
+
 测试和代码检查在电脑上运行；只在手机上运行的代码按照手机目标检查：
 
 ```sh
@@ -205,6 +221,29 @@ cargo ndk -t arm64-v8a --platform 30 test -p skyward -p skyward-block -p skyward
 ```sh
 cargo run --release -p skyward-preview -- target/preview --lang en
 ```
+
+### 构建在第三方 recovery 上
+
+`[base]` 中 `third_party = true` 的机型构建在第三方 recovery 上。基底镜像是 recovery 分区的内容，`partition_size` 是分区大小；打包工具先按 `sha256` 核对镜像，镜像里没有 TWRP 的文件、或者配置写的是原厂 recovery 而镜像里有，都会停止。`drop` 列出的基底文件不放进镜像，Skyward 替换基底自己的 recovery 程序，基底里和安装脚本要找的命令同名的程序换成指向 Skyward 的链接。基底的内核没有的模块、驱动读取的固件和程序需要的库用 `--add-file <电脑上的文件>=<ramdisk 中的路径>` 加入，已经在 ramdisk 里的文件不能覆盖。`--avb-key` 给出 PEM 格式的 RSA 私钥时，镜像末尾的 vbmeta 按 avbtool 的方式签名。三星手机还需要 Odin 用的 tar：
+
+```sh
+target/release/skyward-pack recovery \
+  --stock p3q-recovery.img \
+  --binary target/aarch64-linux-android/release/skyward \
+  --system-init target/system-init/aarch64-linux-android/release/system-init \
+  --config devices/p3q.toml \
+  --font resources/fonts/MiSansVF.ttf \
+  --mono resources/fonts/KirkMono-Regular.ttf \
+  --mono-license resources/fonts/KirkMono-OFL.txt \
+  --add-file files/lib/modules/dhd.ko=lib/modules/dhd.ko \
+  --add-file files/lib/modules/modules.dep=lib/modules/modules.dep \
+  --out target/skyward-p3q.img
+target/release/skyward-pack odin --image target/skyward-p3q.img --out target/skyward-p3q.tar.md5
+```
+
+S21 Ultra 的 WLAN 驱动 `dhd.ko` 要用基底内核自己的源码、按基底内核的配置构建，vermagic 和符号版本才能对上；它读取的 `bcmdhd_sta.bin`、`bcmdhd_clm.blob`、`nvram_net.txt` 来自原厂 vendor 分区的 `etc/wifi`，放在 ramdisk 的 `system/etc/wifi`。
+
+CI 从本仓库标签为 `base-images` 的 Release 中取基底：`<代号>-recovery.img`，以及需要加入的文件 `<代号>-files.zip`，zip 里每个文件放在它在 ramdisk 中的路径。基底按设备配置中的 `[base] sha256` 核对，没有写 `sha256` 时停止；zip 中的文件按仓库里的 `devices/<代号>.files.sha256` 核对，这个文件是在 zip 解压出的目录里运行 `sha256sum` 的输出，只有其中列出的文件会加入镜像。`base-images` 中还没有这台手机的基底时，CI 跳过这台手机。
 
 ### 翻译
 

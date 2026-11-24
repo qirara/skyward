@@ -857,6 +857,21 @@ mod tests {
     }
 
     #[test]
+    fn p3q_is_built_on_a_recovery_of_another_make_without_slots() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/p3q.toml")).unwrap();
+        assert_eq!((cfg.device.codename.as_str(), cfg.device.ab), ("p3q", false));
+        assert!(cfg.base.third_party && !cfg.base.mtp, "OrangeFox's, keeping adb alone");
+        assert_eq!(cfg.base.partition_size, Some(81_788_928), "its recovery partition is 78 MiB");
+        assert!(cfg.stock.is_none() && cfg.update.is_none(), "no stock build the recovery is made on, and no update server it knows");
+        let timed = cfg.haptics.expect("the S21 Ultra has a motor").timed.expect("played by its length");
+        assert_eq!((timed.intensity_max, timed.click), (Some(10000), 30));
+        let wlan = cfg.wlan.expect("its WLAN is brought up");
+        assert_eq!((wlan.modules.as_slice(), wlan.service), (&["dhd".to_string()][..], None), "a supplicant of the older kind names no service");
+        assert_eq!(cfg.firmware.map(|f| f.partition).as_deref(), Some("apnhlos"));
+        assert!(!cfg.wipe.logs.iter().any(|l| l.contains("wifi")), "the saved networks are no log");
+    }
+
+    #[test]
     fn the_vendor_interfaces_libraries_go_where_the_configuration_puts_them() {
         let with = |body: &str| {
             DeviceConfig::parse(&format!(

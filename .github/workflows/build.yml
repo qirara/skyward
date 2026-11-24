@@ -116,6 +116,8 @@ jobs:
       fail-fast: false
       matrix:
         device: ${{ fromJSON(needs.devices.outputs.devices) }}
+    env:
+      DEVICE: ${{ matrix.device }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -124,11 +126,27 @@ jobs:
           path: tools
       - name: Make the tools runnable
         run: chmod +x tools/skyward tools/skyward-pack
+      # Most phones' recoveries are built on the stock one, taken out of
+      # the phone maker's full update package; a phone whose own recovery
+      # does not start Skyward is built on a recovery of another make,
+      # which its configuration's [base] names. Samsung's phones are
+      # flashed with Odin as well, which takes a tar of its own.
+      - name: Read what the recovery is built on
+        id: base
+        run: |
+          python3 - "devices/$DEVICE.toml" >> "$GITHUB_OUTPUT" <<'EOF'
+          import sys, tomllib
+          config = tomllib.load(open(sys.argv[1], "rb"))
+          print("third_party=" + str(config.get("base", {}).get("third_party", False)).lower())
+          print("odin=" + str(config["device"].get("brand") == "Samsung").lower())
+          EOF
       - name: Read the stock build the recovery is made on
         id: stock
-        run: tools/skyward-pack stock --config "devices/${{ matrix.device }}.toml" >> "$GITHUB_OUTPUT"
+        if: steps.base.outputs.third_party == 'false'
+        run: tools/skyward-pack stock --config "devices/$DEVICE.toml" >> "$GITHUB_OUTPUT"
       - name: Restore the stock recovery
         id: cache
+        if: steps.base.outputs.third_party == 'false'
         uses: actions/cache@v6
         with:
           path: stock/recovery.img
@@ -136,36 +154,123 @@ jobs:
       # Only what the recovery partition takes is read of the package,
       # which is several gigabytes in all.
       - name: Take the recovery partition out of the stock package
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: tools/skyward-pack stock --config "devices/${{ matrix.device }}.toml" --out stock/recovery.img
+        if: steps.base.outputs.third_party == 'false' && steps.cache.outputs.cache-hit != 'true'
+        run: tools/skyward-pack stock --config "devices/$DEVICE.toml" --out stock/recovery.img
       - name: Check the stock recovery
+        if: steps.base.outputs.third_party == 'false'
         env:
           RECOVERY: ${{ steps.stock.outputs.recovery }}
         run: echo "$RECOVERY  stock/recovery.img" | sha256sum --check
+      # No phone maker hands a recovery of another make out: the repository
+      # keeps it in its own release tagged base-images, as
+      # <codename>-recovery.img, with any files the recovery needs beside
+      # it, such as kernel modules its kernel leaves out, as
+      # <codename>-files.zip, each at its path in the ramdisk. A phone
+      # whose base is not there yet is passed over.
+      - name: Download the base the recovery is built on
+        id: download
+        if: steps.base.outputs.third_party == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          assets=$(gh release view base-images --json assets --jq '.assets[].name' || true)
+          if ! grep -qxF "$DEVICE-recovery.img" <<< "$assets"; then
+            echo "::notice::the base-images release holds no $DEVICE-recovery.img, so no recovery is built for $DEVICE"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir base
+          gh release download base-images --pattern "$DEVICE-recovery.img" --dir base
+          if grep -qxF "$DEVICE-files.zip" <<< "$assets"; then
+            gh release download base-images --pattern "$DEVICE-files.zip" --dir base
+          fi
+          echo "present=true" >> "$GITHUB_OUTPUT"
+      # What the release holds is built on only as the repository itself
+      # names it: the base by the SHA-256 in the configuration's [base],
+      # which the packer checks it against, and each file by its line in
+      # devices/<codename>.files.sha256, as sha256sum writes them, the path
+      # being the file's in the ramdisk. A file of the zip the list does
+      # not name is left out.
+      - name: Check the files the recovery is given
+        id: files
+        if: steps.download.outputs.present == 'true'
+        run: |
+          sum=$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["base"].get("sha256", ""))' "devices/$DEVICE.toml")
+          if [ -z "$sum" ]; then
+            echo "::error::devices/$DEVICE.toml names no [base] sha256 to check $DEVICE-recovery.img against"
+            exit 1
+          fi
+          echo "suffix=base-${sum::12}" >> "$GITHUB_OUTPUT"
+          list="devices/$DEVICE.files.sha256"
+          : > base/added
+          if [ -f "base/$DEVICE-files.zip" ]; then
+            if [ ! -f "$list" ]; then
+              echo "::error::the base-images release holds $DEVICE-files.zip, and no $list names what of it the recovery takes"
+              exit 1
+            fi
+            mkdir base/files
+            unzip -q "base/$DEVICE-files.zip" -d base/files
+            (cd base/files && sha256sum --check --strict "../../$list")
+            while read -r _ path; do
+              case "$path" in
+                "" | /* | *..* | \** ) echo "::error::$list names $path, which is not a path in the ramdisk"; exit 1 ;;
+              esac
+              echo "base/files/$path=$path" >> base/added
+            done < "$list"
+          elif [ -f "$list" ]; then
+            echo "::error::$list names files the base-images release holds no $DEVICE-files.zip of"
+            exit 1
+          fi
       - name: Pack the recovery
         id: pack
+        if: steps.base.outputs.third_party == 'false' || steps.download.outputs.present == 'true'
         env:
-          DEVICE: ${{ matrix.device }}
-          STOCK: ${{ steps.stock.outputs.version }}
+          STOCK: ${{ steps.stock.outputs.version || steps.files.outputs.suffix }}
+          THIRD_PARTY: ${{ steps.base.outputs.third_party }}
         run: |
           if [ "$GITHUB_REF_TYPE" = tag ]; then version="$GITHUB_REF_NAME"; else version="${GITHUB_SHA::7}"; fi
           name="skyward-$version-$DEVICE-$STOCK"
+          base=stock/recovery.img
+          added=()
+          if [ "$THIRD_PARTY" = true ]; then
+            base="base/$DEVICE-recovery.img"
+            while read -r file; do
+              added+=(--add-file "$file")
+            done < base/added
+          fi
           mkdir out
-          tools/skyward-pack recovery --stock stock/recovery.img --binary tools/skyward --system-init tools/system-init \
+          tools/skyward-pack recovery --stock "$base" --binary tools/skyward --system-init tools/system-init \
             --config "devices/$DEVICE.toml" --font resources/fonts/MiSansVF.ttf --mono resources/fonts/KirkMono-Regular.ttf \
-            --mono-license resources/fonts/KirkMono-OFL.txt --out "out/$name.img"
+            --mono-license resources/fonts/KirkMono-OFL.txt "${added[@]}" --out "out/$name.img"
           echo "name=$name" >> "$GITHUB_OUTPUT"
       # The image is the whole partition, flashed as it is, and most of it
       # is the room the recovery leaves empty; it is handed out zipped.
       - name: Zip the image
+        if: steps.pack.outputs.name != ''
         working-directory: out
         env:
           NAME: ${{ steps.pack.outputs.name }}
         run: zip -9 "$NAME.zip" "$NAME.img"
-      # The artifact takes the zip's name.
+      # Odin flashes what a tar holds, each file to the partition it is
+      # named after, once the tar's MD5 on its last line holds.
+      - name: Pack the image for Odin
+        if: steps.pack.outputs.name != '' && steps.base.outputs.odin == 'true'
+        env:
+          NAME: ${{ steps.pack.outputs.name }}
+        run: tools/skyward-pack odin --image "out/$NAME.img" --out "out/$NAME.tar.md5"
+      # Each artifact takes its file's name.
       - uses: actions/upload-artifact@v7
+        if: steps.pack.outputs.name != ''
         with:
           path: out/${{ steps.pack.outputs.name }}.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        if: steps.pack.outputs.name != '' && steps.base.outputs.odin == 'true'
+        with:
+          path: out/${{ steps.pack.outputs.name }}.tar.md5
           archive: false
           if-no-files-found: error
           retention-days: 7
@@ -180,30 +285,47 @@ jobs:
     steps:
       # The devices' configurations say which phone each zip is for.
       - uses: actions/checkout@v7
-      # Each artifact is a zip, which the download keeps whole under its
-      # name, as it is handed out.
+      # Each artifact is a zip, or a tar for Odin, which the download keeps
+      # whole under its name, as it is handed out.
       - uses: actions/download-artifact@v8
         with:
           pattern: skyward-*
           path: images
           merge-multiple: true
           skip-decompress: true
-      - name: Sum the zips
+      - name: Sum the zips and the tars
         working-directory: images
-        run: sha256sum -- *.zip > SHA256SUMS
+        run: |
+          shopt -s nullglob
+          sha256sum -- *.zip *.tar.md5 > SHA256SUMS
       # Each zip shows on the release as the phone it is for, its model and
-      # then its codename, which is how people look for theirs; a device
-      # whose zip is missing stops the release.
+      # then its codename, which is how people look for theirs, and a tar
+      # for Odin beside it as the same phone's. A device whose zip is
+      # missing stops the release, but for one built on a base the
+      # base-images release does not hold yet, which was passed over.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          zips=()
+          shopt -s nullglob
+          bases=$(gh release view base-images --json assets --jq '.assets[].name' || true)
+          files=()
           for config in devices/*.toml; do
             device=$(basename "$config" .toml)
-            model=$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["device"]["model"])' "$config")
-            zip=$(ls images/skyward-"$GITHUB_REF_NAME"-"$device"-*.zip)
-            zips+=("$zip#$model ($device)")
+            read -r third_party model < <(python3 -c 'import sys, tomllib; c = tomllib.load(open(sys.argv[1], "rb")); print(str(c.get("base", {}).get("third_party", False)).lower(), c["device"]["model"])' "$config")
+            zip=(images/skyward-"$GITHUB_REF_NAME"-"$device"-*.zip)
+            if [ "${#zip[@]}" -ne 1 ]; then
+              if [ "$third_party" = true ] && ! grep -qxF "$device-recovery.img" <<< "$bases"; then
+                echo "::warning::no recovery for $device, whose base the base-images release does not hold"
+                continue
+              fi
+              echo "::error::the release holds ${#zip[@]} zips for $device"
+              exit 1
+            fi
+            files+=("${zip[0]}#$model ($device)")
+            for tar in images/skyward-"$GITHUB_REF_NAME"-"$device"-*.tar.md5; do
+              files+=("$tar#$model ($device), for Odin")
+            done
           done
-          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes "${zips[@]}" images/SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes "${files[@]}" images/SHA256SUMS

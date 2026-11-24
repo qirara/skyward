@@ -138,7 +138,7 @@ impl Worker {
                 Task::CheckSkyward { probe, codename } => {
                     let a = http::agent(servers.clone());
                     *using.lock().expect("the agent is not held by a thread that panicked") = Some(a.clone());
-                    let answer = github::ask(&a, &codename, skyward_info::VERSION).map_err(|e| unanswered(&e, github::LATEST, &probe, &servers));
+                    let answer = github::ask(&a, &codename, skyward_info::VERSION).map_err(|e| unanswered(&e, &github::latest(), &probe, &servers));
                     tell(Event::SkywardChecked(answer));
                 }
                 // GitHub's API hands the zip out at a short-lived address
@@ -335,7 +335,7 @@ fn write(path: &Path, codename: &str, tell: &dyn Fn(Event)) -> End {
     let ready = || -> Result<(Vec<u8>, Vec<Slot>)> {
         let image = upgrade::unzip(path)?;
         upgrade::check(&image, codename)?;
-        let next = skyward_vab::boot::next_slot().context("ask which slot starts next")?;
+        let next = skyward_vab::boot::starting_next().context("ask which slot starts next")?;
         Ok((image, upgrade::slots(dir, next)?))
     };
     let (image, slots) = match ready() {

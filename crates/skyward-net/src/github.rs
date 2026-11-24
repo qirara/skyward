@@ -4,8 +4,37 @@
 use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
 
+/// The repository whose releases this build takes for Skyward's, as
+/// `owner/name`: the one `SKYWARD_RELEASES` names as it is built, so that a
+/// fork's builds update from the fork's own releases, and upstream's
+/// otherwise. A build updates itself from no one else's.
+pub const REPOSITORY: &str = match option_env!("SKYWARD_RELEASES") {
+    Some(repository) => repository,
+    None => "kirklin/skyward",
+};
+
+const _: () = assert!(names_a_repository(REPOSITORY), "SKYWARD_RELEASES is not a GitHub repository as owner/name");
+
+/// Whether `s` is `owner/name` as GitHub spells either.
+const fn names_a_repository(s: &str) -> bool {
+    let b = s.as_bytes();
+    let (mut i, mut slashes, mut last) = (0, 0, b'/');
+    while i < b.len() {
+        match b[i] {
+            b'/' if last != b'/' => slashes += 1,
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {}
+            _ => return false,
+        }
+        last = b[i];
+        i += 1;
+    }
+    slashes == 1 && last != b'/' && !b.is_empty() && b[0] != b'/'
+}
+
 /// Where GitHub answers which release of Skyward is the newest.
-pub const LATEST: &str = "https://api.github.com/repos/kirklin/skyward/releases/latest";
+pub fn latest() -> String {
+    format!("https://api.github.com/repos/{REPOSITORY}/releases/latest")
+}
 
 /// The version of GitHub's API the answer is read as.
 const API_VERSION: &str = "2022-11-28";
@@ -69,7 +98,7 @@ struct Message {
     message: String,
 }
 
-/// The newest release that `answer`, GitHub's answer at [`LATEST`], tells
+/// The newest release that `answer`, GitHub's answer at [`latest`], tells
 /// of, and its zip for the phone `codename` names, as the build of version
 /// `running` sees it.
 pub fn newest(answer: &str, codename: &str, running: &str) -> Result<Newest> {
@@ -95,15 +124,16 @@ pub fn newest(answer: &str, codename: &str, running: &str) -> Result<Newest> {
 /// Ask GitHub for Skyward's newest release, and its zip for the phone
 /// `codename` names, as the build of version `running`.
 pub fn ask(agent: &ureq::Agent, codename: &str, running: &str) -> Result<Newest> {
+    let latest = latest();
     let mut response = agent
-        .get(LATEST)
+        .get(&latest)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", API_VERSION)
         .header("User-Agent", format!("Skyward/{running}"))
         .call()
-        .with_context(|| format!("ask {LATEST}"))?;
+        .with_context(|| format!("ask {latest}"))?;
     let status = response.status();
-    let body = response.body_mut().read_to_string().with_context(|| format!("read the answer of {LATEST}"))?;
+    let body = response.body_mut().read_to_string().with_context(|| format!("read the answer of {latest}"))?;
     if !status.is_success() {
         bail!(refusal(status, &body));
     }
@@ -146,6 +176,15 @@ fn refusal(status: ureq::http::StatusCode, body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_releases_are_asked_of_one_repository_by_its_owner_and_name() {
+        assert!(names_a_repository("kirklin/skyward") && names_a_repository("qirara/skyward") && names_a_repository("a-b/c.d_e"));
+        for bad in ["", "skyward", "/skyward", "kirklin/", "a/b/c", "kirklin//skyward", "evil.example/x?y", "a/b#c", "a b/c"] {
+            assert!(!names_a_repository(bad), "{bad:?}");
+        }
+        assert!(latest().starts_with("https://api.github.com/repos/") && latest().ends_with("/releases/latest"));
+    }
 
     /// What GitHub answered of the newest release on 2026-11-07, with the
     /// parts that do not matter here left out.

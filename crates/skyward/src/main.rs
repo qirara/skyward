@@ -558,9 +558,12 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
     adopt_installed_version(&props)?;
     // The phone's own init has the build's properties before it starts any
     // program, and the hardware services pick their modules by the
-    // ro.hardware.* ones; a recovery of another make has none of them.
+    // ro.hardware.* ones; a recovery of another make has none of them, nor
+    // the external_storage.* ones that say how the data partition is to be
+    // made afresh for the system's shared storage, case folded or not.
     if cfg.base.third_party {
-        for (name, value) in props.iter().filter(|(name, _)| name.starts_with("ro.hardware.")) {
+        let carried = |name: &str| name.starts_with("ro.hardware.") || name.starts_with("external_storage.");
+        for (name, value) in props.iter().filter(|(name, _)| carried(name)) {
             if skyward_sys::prop(name).is_none() {
                 skyward_sys::set_prop(name, value)?;
                 skyward_sys::kmsg(&format!("{name} is {value}, as the installed build has it"))?;

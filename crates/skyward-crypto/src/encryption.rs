@@ -68,9 +68,16 @@ pub fn files(entries: &[Entry]) -> bool {
 /// where its key is kept as well, for the system makes the key anew with
 /// the filesystem.
 pub fn made_afresh(entry: &Entry) -> bool {
-    let formattable = entry.extras.iter().any(|e| e == "formattable");
-    let key_kept = entry.extra("metadata_encryption").is_none() || entry.extra("keydirectory").is_some();
-    formattable && key_kept
+    entry.extras.iter().any(|e| e == "formattable") && key_kept(entry)
+}
+
+/// Whether the system makes the key of the partition an entry names anew
+/// once the key is gone: it does where the table says where the key is
+/// kept, and has none to make where the partition is not encrypted whole.
+/// A partition a recovery makes afresh, as Android's own makes it, is then
+/// encrypted whole again as the system next starts.
+pub fn key_kept(entry: &Entry) -> bool {
+    entry.extra("metadata_encryption").is_none() || entry.extra("keydirectory").is_some()
 }
 
 /// How the first of `entries` that encrypts files one by one has them
@@ -180,6 +187,20 @@ mod tests {
             !made_afresh(&entry("latemount,wait,formattable,metadata_encryption=aes-256-xts:wrappedkey_v0")),
             "encrypted whole with nowhere said for the key"
         );
+    }
+
+    #[test]
+    fn a_partition_made_afresh_here_has_its_key_made_anew_where_the_table_says_where_it_is_kept() {
+        // The S21 Ultra running a port of One UI 8.5, whose table leaves
+        // formattable out: the system mounts its data partition as it is.
+        let port = entry(
+            "latemount,wait,check,,fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized,quota,reservedsize=128M,checkpoint=fs,fscompress,keydirectory=/metadata/vold/metadata_encryption",
+        );
+        assert!(!made_afresh(&port), "left for the recovery to make");
+        assert!(key_kept(&port));
+        assert!(key_kept(&entry(PLAIN)), "no key to make");
+        assert!(key_kept(&entry("latemount,wait,metadata_encryption=aes-256-xts,keydirectory=/metadata/vold/metadata_encryption")));
+        assert!(!key_kept(&entry("latemount,wait,metadata_encryption=aes-256-xts:wrappedkey_v0")), "nowhere said for the key");
     }
 
     #[test]

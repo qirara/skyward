@@ -125,9 +125,9 @@ impl Step {
 pub enum Refusal {
     /// An update the system has still to finish.
     Update(Hold),
-    /// The system does not make an emptied data partition afresh: the
-    /// phone's table does not call it formattable, or has it encrypted
-    /// whole and does not say where its key is kept.
+    /// The system would not make the key of an emptied data partition
+    /// anew: the phone's table has it encrypted whole and does not say
+    /// where its key is kept.
     NotRebuilt,
     /// The phone has no cache partition.
     NoCache,
@@ -156,8 +156,8 @@ pub struct Plan {
     data: Entry,
     cache: Option<Entry>,
     metadata: Entry,
-    /// The filesystem each partition is made afresh as, where the system
-    /// asked for one.
+    /// The filesystem the data partition is made afresh as here, where it
+    /// is not left for the system to make.
     reformat: Option<String>,
 }
 
@@ -165,17 +165,25 @@ pub struct Plan {
 /// partition where the phone has one, and /metadata. An update the system
 /// has still to finish holds it back, as Android's own recovery is held back
 /// by one it cannot finish for the system. The data partition is erased
-/// only as one the system makes afresh as it starts, unless `reformat`
-/// names the filesystem the system asked for it to be made as here.
+/// as one the system makes afresh as it starts where its table says so,
+/// and made afresh here otherwise, as the filesystem `reformat` names
+/// where the system asked for one, or as the one the table names.
 pub fn factory_reset(reformat: Option<String>) -> Result<Plan, Stop> {
     let plan = (|| -> Result<Result<Plan, Refusal>> {
         if let Some(hold) = update_hold()? {
             return Ok(Err(Refusal::Update(hold)));
         }
         let data = first(DATA)?;
-        if !skyward_crypto::encryption::made_afresh(&data) && reformat.is_none() {
-            return Ok(Err(Refusal::NotRebuilt));
-        }
+        // A data partition the phone's table does not call formattable the
+        // system mounts as it is, and does not make afresh: it is made
+        // afresh here then, as the filesystem the table names, as Android's
+        // own recovery makes it, wherever the system makes its key anew.
+        let reformat = match reformat {
+            Some(filesystem) => Some(filesystem),
+            None if skyward_crypto::encryption::made_afresh(&data) => None,
+            None if skyward_crypto::encryption::key_kept(&data) => Some(data.filesystem.clone()),
+            None => return Ok(Err(Refusal::NotRebuilt)),
+        };
         Ok(Ok(Plan { data, cache: cache()?, metadata: first(METADATA)?, reformat }))
     })();
     match plan {

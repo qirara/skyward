@@ -346,10 +346,17 @@ target/release/skyward-pack recovery \
 target/release/skyward-pack odin --image target/skyward-p3q.img --out target/skyward-p3q.tar.md5
 ```
 
-The S21 Ultra's WLAN driver, `dhd.ko`, is built from the base kernel's own source
-with its configuration, for its version magic and symbol versions to match; the
-`bcmdhd_sta.bin`, `bcmdhd_clm.blob` and `nvram_net.txt` it reads come from the stock
-vendor partition's `etc/wifi`, and go in the ramdisk's `system/etc/wifi`.
+The S21 Ultra's WLAN driver, `dhd.ko`, is a module no kernel of the phone builds
+in, and loads only into the kernel it was built for. Given the phone's own boot
+image with `--kernel` and its dtbo partition with `--dtbo`, the recovery runs the
+kernel the installed system runs, with the device trees and overlays built with
+it, and loads the vendor partition's own `dhd.ko`; the firmware it asks the
+kernel for, `bcmdhd_sta.bin`, `nvram.txt` and `bcmdhd_clm.blob`, ueventd finds in
+the vendor partition's `firmware/wifi`. The kernel goes in gzip, as the base's
+does, and device trees a build put after it go to the image's own. On the base's
+kernel instead, a `dhd.ko` built from that kernel's own source with its
+configuration, for its version magic and symbol versions to match, goes in with
+`--add-file` as above.
 
 The workflow takes the base from the repository's own release tagged
 `base-images`: `<codename>-recovery.img`, and the files to add as

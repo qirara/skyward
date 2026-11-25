@@ -5,6 +5,7 @@
 //! recovery on the phone.
 
 mod image;
+pub mod kernel;
 mod ramdisk;
 
 pub use image::{BootHeader, BootImage};

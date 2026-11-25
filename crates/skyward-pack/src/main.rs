@@ -20,6 +20,9 @@ struct Cli {
     cmd: Cmd,
 }
 
+// The command is read once from the command line, so the size of its
+// largest form costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Cmd {
     /// Print an image's header and the files in its ramdisk.
@@ -76,6 +79,17 @@ enum Cmd {
         /// or firmware or a library its drivers and programs ask for there.
         #[arg(long = "add-file", value_name = "HOST=PATH")]
         add_files: Vec<String>,
+        /// The phone's own boot image, whose kernel the recovery runs in
+        /// place of the base's, so that the modules the installed system's
+        /// kernel was built with load in the recovery too, its WLAN driver
+        /// among them. Device trees a build put after the kernel go to the
+        /// image's own; the kernel is carried in gzip, as a recovery's is.
+        #[arg(long)]
+        kernel: Option<PathBuf>,
+        /// The phone's dtbo partition, the overlays built with that kernel,
+        /// for the recovery to apply in place of the base's own.
+        #[arg(long, requires = "kernel")]
+        dtbo: Option<PathBuf>,
         /// An RSA private key, in PEM, to sign the image's vbmeta footer
         /// with as avbtool signs one, for a bootloader that reads the
         /// signature; the footer is left unsigned without one.
@@ -164,7 +178,7 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img, &img.to_bytes()?)
         }
-        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, add_files, avb_key, out } => {
+        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, add_files, kernel, dtbo, avb_key, out } => {
             let cfg = skyward_config::DeviceConfig::load(&config)?;
             let base = &cfg.base;
             let read = |p: &PathBuf| std::fs::read(p).with_context(|| format!("read {}", p.display()));
@@ -248,7 +262,25 @@ fn main() -> Result<()> {
             let mut props = without(stock_props, &BUILD_VERSION);
             props.extend_from_slice(b"\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\n");
             rd.replace(paths::PROP_DEFAULT, props)?;
-            // The kernel the base carries unpacks the compression it came in.
+            if let Some(boot) = &kernel {
+                let theirs = BootImage::read(boot)?;
+                let (image, trees) = skyward_bootimg::kernel::split_appended_dtbs(&theirs.kernel);
+                // The trees go where the bootloader reads them in a legacy
+                // image; a boot image of the legacy kind may hold them there.
+                let trees = if trees.is_empty() { &theirs.dtb[..] } else { trees };
+                ensure!(!trees.is_empty(), "the kernel in {} carries no device tree, after it or beside it", boot.display());
+                ensure!(!img.dtb.is_empty(), "{} has no device tree of its own for the kernel's to take the place of", stock.display());
+                img.kernel = match image.starts_with(&[0x1f, 0x8b]) {
+                    true => image.to_vec(),
+                    false => skyward_bootimg::kernel::gzip(image)?,
+                };
+                img.dtb = trees.to_vec();
+                if let Some(dtbo) = &dtbo {
+                    img.recovery_dtbo = skyward_bootimg::kernel::dtbo_table(&read(dtbo)?).with_context(|| format!("read {}", dtbo.display()))?.to_vec();
+                }
+            }
+            // The kernel the base carries unpacks the compression it came in,
+            // as does the phone's own, built for the same bootloader.
             img.ramdisk = rd.encode_as(compression)?;
             let bytes = img.to_bytes()?;
             let key = avb_key.as_deref().map(avb::Key::read).transpose()?;

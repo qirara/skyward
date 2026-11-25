@@ -241,7 +241,7 @@ target/release/skyward-pack recovery \
 target/release/skyward-pack odin --image target/skyward-p3q.img --out target/skyward-p3q.tar.md5
 ```
 
-S21 Ultra 的 WLAN 驱动 `dhd.ko` 要用基底内核自己的源码、按基底内核的配置构建，vermagic 和符号版本才能对上；它读取的 `bcmdhd_sta.bin`、`bcmdhd_clm.blob`、`nvram_net.txt` 来自原厂 vendor 分区的 `etc/wifi`，放在 ramdisk 的 `system/etc/wifi`。
+S21 Ultra 的 WLAN 驱动 `dhd.ko` 是模块，这台手机的内核都不内置它，它也只能装进编译它的那个内核。用 `--kernel` 给出手机自己的 boot 镜像、用 `--dtbo` 给出它的 dtbo 分区，recovery 就运行和已安装系统相同的内核，带上同时编译的设备树和 overlay，并加载 vendor 分区自己的 `dhd.ko`；它向内核请求的固件 `bcmdhd_sta.bin`、`nvram.txt`、`bcmdhd_clm.blob` 由 ueventd 在 vendor 分区的 `firmware/wifi` 里找到。内核按基底的做法用 gzip 压缩，编译时接在内核后面的设备树放进镜像自己的 dtb。仍用基底的内核时，就要用那个内核自己的源码、按它的配置编译 `dhd.ko`，vermagic 和符号版本才能对上，再像上面那样用 `--add-file` 加入。
 
 CI 从本仓库标签为 `base-images` 的 Release 中取基底：`<代号>-recovery.img`，以及需要加入的文件 `<代号>-files.zip`，zip 里每个文件放在它在 ramdisk 中的路径。基底按设备配置中的 `[base] sha256` 核对，没有写 `sha256` 时停止；zip 中的文件按仓库里的 `devices/<代号>.files.sha256` 核对，这个文件是在 zip 解压出的目录里运行 `sha256sum` 的输出，只有其中列出的文件会加入镜像。`base-images` 中还没有这台手机的基底时，CI 跳过这台手机。
 

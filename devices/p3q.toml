@@ -18,13 +18,16 @@ height = 3200
 density = 560
 diagonal = 6.8
 
-# The recovery's kernel is the base's, not the one the system boots, and
-# the vendor partition's modules are built for that one. What the base's
-# kernel leaves out is put in the recovery's own /lib/modules, with its
-# modules.dep, as the image is built: of what Skyward loads, only the
-# WLAN's driver, loaded as the WLAN comes up.
+# The recovery's kernel is the base's unless the image is built with the
+# phone's own (skyward-pack recovery --kernel boot.img --dtbo dtbo.img):
+# the vendor partition's modules are built for the kernel the system boots.
+# What the base's kernel leaves out is put in the recovery's own
+# /lib/modules, with its modules.dep, as the image is built; a recovery
+# running the system's kernel loads the vendor partition's own. Of what
+# Skyward loads, that is only the WLAN's driver, loaded as the WLAN comes
+# up.
 [modules]
-sources = ["vendor_boot"]
+sources = ["vendor_boot", "vendor"]
 
 # The firmware of the phone's processors, and the apps its secure world
 # loads, the key service's among them, are on the apnhlos partition, which
@@ -40,11 +43,13 @@ partition = "apnhlos"
 [partitions]
 mounted = ["persist"]
 
-# WLAN: Broadcom's BCM4389 on PCIe, driven by dhd. The base's kernel does
-# not build it in, so a dhd.ko built from the base's own kernel source, for
-# that kernel, is added to the recovery with the firmware and NVRAM it
-# reads: bcmdhd_sta.bin, bcmdhd_clm.blob and nvram_net.txt from the vendor
-# partition's etc/wifi, in /system/etc/wifi. wpa_supplicant is the vendor
+# WLAN: Broadcom's BCM4389 on PCIe, driven by dhd, which no kernel of the
+# phone builds in: a dhd.ko for the recovery's own kernel is in the vendor
+# partition where the recovery runs the system's kernel, or is added to the
+# recovery for the base's. Built for PCIe, it asks the kernel's firmware
+# loader for bcmdhd_sta.bin, nvram.txt and bcmdhd_clm.blob, which ueventd
+# finds in the vendor partition's firmware/wifi, as the phone's own
+# ueventd.rc has it look there. wpa_supplicant is the vendor
 # partition's, of the older kind, which registers with the directory of the
 # phone's hardware services and so names no service. It runs on the vendor
 # partition's libraries and then those of the vendor interface the phone

@@ -108,6 +108,7 @@
 - 打开 data 分区：这台手机的系统并没有加密 data 里的文件，init 先加密的那些目录都没有加密策略，Skyward 直接打开，没有用户的文件需要解锁。这个移植的 vold（`/system/bin/vold`）用的仍是 Android 的布局（`/unencrypted/{key,ref,mode}`、`/misc/vold/user_keys`，另有三星的 `sec_backup_unencrypted` 备份），系统以后加密了 data，就按原来的解密流程走，这条路在这台手机上还没有试过。
 - 恢复出厂设置：Skyward 按 fstab 重新建立 data 和 `/metadata`，完成。
 - WLAN：用 `--kernel`/`--dtbo` 打包、运行系统自己内核的镜像加载了 `/vendor/lib/modules/dhd.ko`，固件在 `/vendor/firmware/wifi/`（`bcmdhd_sta.bin`、`nvram.txt`、`bcmdhd_clm.blob` 和各版本芯片的变体），2.4 GHz 和 5 GHz 的网络都能搜到，DHCP 正常。触摸和显示在这个内核上也正常。
+- 恢复出厂设置以后、系统还没开机之前，data 分区里没有内部存储（`/data/media/0` 由系统第一次开机时建立）。以前 Skyward 仍把这时的 `/sdcard`（recovery 自己在内存里的目录）当成内部存储，MTP 也提供它，往里传大文件会占满内存，传不到 5 GB 就提示空间不足。现在这时页面按“已清空”对待，不提供内部存储；`/sdcard` 在内部存储出现之前挂上一个只读的空文件系统，`adb push` 会立刻报错而不是写进内存。`/tmp` 本身就在内存里（tmpfs，最多约为内存的一半），不能放几 GB 的刷机包。
 - WLAN 记住连过的网络：网络接受了密码，就和密码一起写进 `/metadata/skyward/settings.json`（只有 root 能读，0600），WLAN 开关的状态也一起保存。之后点这个网络直接连接；关掉 WLAN 再打开，或者 recovery 重新启动，会自动连接搜到的已保存网络中信号最强的一个。网络拒绝密码时忘掉它；“删除网络”和恢复出厂设置也会把它删掉。
 
 在手机上发现并已经修复：
@@ -125,6 +126,9 @@
 - 解密加密过的 data：Keymaster 在这台手机上还没有真正解开过任何密钥。第三方 recovery 通常只能解密 AOSP 类 ROM 的 data，三星自己的系统加密的 data 一般解不开。
 - hermesd（三星 Gatekeeper 的存储）的参数是 `/data/vendor/gatekeeper`，data 解开之前没有这个目录，它每秒退出一次，日志里一连串 `hermesd ... exit status: 1` 就是这个；data 解开以后它能否正常运行还没有看到。
 - 时间：persist 和 efs 里都没有时间偏移文件（`time/`），recovery 里的时钟没有设置。
+- 用系统内核（KernelSU Next）打包的镜像启动慢、不稳定：Skyward 在第 71.6 秒才启动（基底内核上是第 9.8 秒），中间约 60 秒正好是内核固件请求的超时，可能是内置的触摸（`y792_p3.bin`）或 S Pen（`w9020_p3_c*.bin`）驱动在 init 之前请求的固件 ramdisk 里没有；有时会停在开机画面然后重启，要重启几次才进得去。基底内核的镜像没有这个问题。不是 vbmeta 校验：校验失败每次都会失败并提示，不会重启几次后又能进入。需要失败那次的 pstore 日志和启动早期的 dmesg 来确认。
+- 在系统内核的镜像上点“通过 adb sideload”会卡死后重启，原因还不知道，可能和内存被 `/sdcard`、`/tmp` 里的大文件占满有关。
+- 带着数据线进入 recovery，或者第一次插上线，USB 多数时候是 2.0：三星的 dwc3-msm 驱动在开机时检测到线已经插着，为了不扰动充电就沿用引导程序留下的 PHY 状态（日志里 `dwc3_gadget_conndone_interrupt (HS)`），重新插拔才会按 USB 3 重新初始化。驱动的 `/sys/devices/platform/soc/a600000.ssusb/mode` 写 `none` 再写 `peripheral` 能像插拔一样重启控制器，能否因此进入 USB 3 还没有在手机上试过。
 - WLAN：基底的内核不能加载系统的 `dhd.ko`，要用第三节的 `--kernel`/`--dtbo` 打包；系统换了内核以后，recovery 也要用新的 boot 镜像重新打包。KernelSU 的内核部分在 recovery 里也会运行。连接后的联网检查有一次报告路由器（10.10.50.1）不回答 DNS，原因还不清楚。
 - 显示密度按同分辨率、尺寸相近的小米 13 Ultra 取 560，没有设置圆角半径。
 - 备份 EFS 时包含 efs、sec_efs、modemst1、modemst2、fsg、fsc、persist；手机上缺少其中任何一个分区时备份会停止，需要按 `/dev/block/by-name` 调整。

@@ -127,8 +127,8 @@
 - hermesd（三星 Gatekeeper 的存储）的参数是 `/data/vendor/gatekeeper`，data 解开之前没有这个目录，它每秒退出一次，日志里一连串 `hermesd ... exit status: 1` 就是这个；data 解开以后它能否正常运行还没有看到。
 - 时间：persist 和 efs 里都没有时间偏移文件（`time/`），recovery 里的时钟没有设置。
 - 用系统内核（KernelSU Next）打包的镜像启动慢、不稳定：Skyward 在第 71.6 秒才启动（基底内核上是第 9.8 秒），中间约 60 秒正好是内核固件请求的超时，可能是内置的触摸（`y792_p3.bin`）或 S Pen（`w9020_p3_c*.bin`）驱动在 init 之前请求的固件 ramdisk 里没有；有时会停在开机画面然后重启，要重启几次才进得去。基底内核的镜像没有这个问题。不是 vbmeta 校验：校验失败每次都会失败并提示，不会重启几次后又能进入。需要失败那次的 pstore 日志和启动早期的 dmesg 来确认。
-- 在系统内核的镜像上点“通过 adb sideload”会卡死后重启，原因还不知道，可能和内存被 `/sdcard`、`/tmp` 里的大文件占满有关。
-- 带着数据线进入 recovery，或者第一次插上线，USB 多数时候是 2.0：三星的 dwc3-msm 驱动在开机时检测到线已经插着，为了不扰动充电就沿用引导程序留下的 PHY 状态（日志里 `dwc3_gadget_conndone_interrupt (HS)`），重新插拔才会按 USB 3 重新初始化。驱动的 `/sys/devices/platform/soc/a600000.ssusb/mode` 写 `none` 再写 `peripheral` 能像插拔一样重启控制器，能否因此进入 USB 3 还没有在手机上试过。
+- 系统内核的镜像开机时卡住重启、点“通过 adb sideload”卡死重启，原因找到了，是这个 ROM 的内核（yanzihan 的树 `3af90cf`，`5.4.304-openela`）的 USB 驱动问题：`dwc3_gadget_pullup()` 和 VBUS 的处理都持着 `dwc->lock` 自旋锁调用 `dwc3_gadget_run_stop()`，而它等待控制器停下时用的是会睡眠的 `usleep_range(1000, 2000)`（`drivers/usb/dwc3/gadget.c` 第 2490 行）。init 往 `/config/usb_gadget/g1/UDC` 写 `none` 切换 USB 功能时（Skyward 启动时设置 USB、开始 sideload 时都会这样），内核报 `BUG: scheduling while atomic`，接着 `init` 出现缺页错误，`Kernel panic - not syncing: Fatal exception`（pstore 的 `console-ramoops-0`）。能不能撑过去看时机，所以有时能进 recovery。系统里插拔数据线、切换 USB 模式也会走到这里。把这一行换成不睡眠的 `udelay(1)`（高通原来的驱动在这里也是忙等）就能修好，要在 ROM 的内核里改；基底内核（三星原厂 5.4.274）不受影响。
+- 带着数据线进入 recovery，或者第一次插上线，USB 多数时候是 2.0：三星的 dwc3-msm 驱动在开机时检测到线已经插着，为了不扰动充电就沿用引导程序留下的 PHY 状态（日志里 `dwc3_gadget_conndone_interrupt (HS)`），重新插拔才会按 USB 3 重新初始化。驱动的 `/sys/devices/platform/soc/a600000.ssusb/mode` 写 `none` 再写 `peripheral` 能像插拔一样重启控制器，但在手机上试过，仍然是 USB 2：三星分支在开机时记下的高速限制（`speed_setting`）只有真正的插拔才会清除，三星 `usb_notify` 的 `gadget_speed` 也只读。没有找到不插拔就进入 USB 3 的办法。
 - WLAN：基底的内核不能加载系统的 `dhd.ko`，要用第三节的 `--kernel`/`--dtbo` 打包；系统换了内核以后，recovery 也要用新的 boot 镜像重新打包。KernelSU 的内核部分在 recovery 里也会运行。连接后的联网检查有一次报告路由器（10.10.50.1）不回答 DNS，原因还不清楚。
 - 显示密度按同分辨率、尺寸相近的小米 13 Ultra 取 560，没有设置圆角半径。
 - 备份 EFS 时包含 efs、sec_efs、modemst1、modemst2、fsg、fsc、persist；手机上缺少其中任何一个分区时备份会停止，需要按 `/dev/block/by-name` 调整。

@@ -105,6 +105,10 @@
 - data 分区直接从 `sda35` 按 f2fs 挂载成功：这个移植的 fstab 虽然有 `keydirectory=`，data 实际上没有 metadata 加密。
 - 系统运行的不是三星原厂内核，而是 ROM 用 CI 编译的 `5.4.304-openela-qgki-UN1CA-KSUN`（KernelSU Next）：boot 分区里是 Image 后面接着设备树，dtbo 和 `/vendor/lib/modules` 里的模块都是同一次编译的。`dhd`（`CONFIG_BCM4389=m`）是模块，触摸驱动内置。
 - U 盘（exFAT）通过三星的 sdfat 驱动只读显示。
+- 打开 data 分区：这台手机的系统并没有加密 data 里的文件，init 先加密的那些目录都没有加密策略，Skyward 直接打开，没有用户的文件需要解锁。这个移植的 vold（`/system/bin/vold`）用的仍是 Android 的布局（`/unencrypted/{key,ref,mode}`、`/misc/vold/user_keys`，另有三星的 `sec_backup_unencrypted` 备份），系统以后加密了 data，就按原来的解密流程走，这条路在这台手机上还没有试过。
+- 恢复出厂设置：Skyward 按 fstab 重新建立 data 和 `/metadata`，完成。
+- WLAN：用 `--kernel`/`--dtbo` 打包、运行系统自己内核的镜像加载了 `/vendor/lib/modules/dhd.ko`，固件在 `/vendor/firmware/wifi/`（`bcmdhd_sta.bin`、`nvram.txt`、`bcmdhd_clm.blob` 和各版本芯片的变体），2.4 GHz 和 5 GHz 的网络都能搜到，DHCP 正常。触摸和显示在这个内核上也正常。
+- WLAN 记住连过的网络：网络接受了密码，就和密码一起写进 `/metadata/skyward/settings.json`（只有 root 能读，0600），WLAN 开关的状态也一起保存。之后点这个网络直接连接；关掉 WLAN 再打开，或者 recovery 重新启动，会自动连接搜到的已保存网络中信号最强的一个。网络拒绝密码时忘掉它；“删除网络”和恢复出厂设置也会把它删掉。
 
 在手机上发现并已经修复：
 
@@ -118,9 +122,9 @@
 
 还没有确认，或者还不能用：
 
-- 解密：这个移植的 vold（来自 SM-S9260 的 One UI 8.5）把密钥放在哪里还不知道，需要它的 `/system/bin/vold` 和上面写进日志的文件名来确定。Keymaster 在这台手机上还没有真正解开过任何密钥。第三方 recovery 通常只能解密 AOSP 类 ROM 的 data，三星自己的系统加密的 data 一般解不开。
+- 解密加密过的 data：Keymaster 在这台手机上还没有真正解开过任何密钥。第三方 recovery 通常只能解密 AOSP 类 ROM 的 data，三星自己的系统加密的 data 一般解不开。
 - hermesd（三星 Gatekeeper 的存储）的参数是 `/data/vendor/gatekeeper`，data 解开之前没有这个目录，它每秒退出一次，日志里一连串 `hermesd ... exit status: 1` 就是这个；data 解开以后它能否正常运行还没有看到。
 - 时间：persist 和 efs 里都没有时间偏移文件（`time/`），recovery 里的时钟没有设置。
-- WLAN：基底的内核不能加载系统的 `dhd.ko`。用第三节的 `--kernel`/`--dtbo` 打包的镜像运行系统自己的内核，`dhd`（按 `DHD_LINUX_STD_FW_API` 编译）通过内核的固件加载器请求 `bcmdhd_sta.bin`、`nvram.txt`、`bcmdhd_clm.blob`，原厂 vendor 的 ueventd.rc 让 ueventd 到 `/vendor/firmware/wifi/` 里找。这种镜像能否正常启动、触摸和 WLAN 是否工作，还没有在手机上试过；KernelSU 的内核部分在 recovery 里也会运行。
+- WLAN：基底的内核不能加载系统的 `dhd.ko`，要用第三节的 `--kernel`/`--dtbo` 打包；系统换了内核以后，recovery 也要用新的 boot 镜像重新打包。KernelSU 的内核部分在 recovery 里也会运行。连接后的联网检查有一次报告路由器（10.10.50.1）不回答 DNS，原因还不清楚。
 - 显示密度按同分辨率、尺寸相近的小米 13 Ultra 取 560，没有设置圆角半径。
 - 备份 EFS 时包含 efs、sec_efs、modemst1、modemst2、fsg、fsc、persist；手机上缺少其中任何一个分区时备份会停止，需要按 `/dev/block/by-name` 调整。

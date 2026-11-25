@@ -2330,6 +2330,12 @@ impl Pages<'_> {
                 }
                 self.closed = opening.closed;
                 show_closed(&mut self.app, &self.closed)?;
+                // A partition no system has started from holds no internal
+                // storage yet: there is none to show, nor to take files.
+                if opening.fresh {
+                    skyward_sys::kmsg("the data partition holds no internal storage until the system first starts from it")?;
+                    self.app.data_made_afresh();
+                }
                 follow_system_zone(&mut self.app, kept_time_zone()?.as_deref(), &self.info)?;
             }
             decrypt::Ended::Opened(Err(why)) => {

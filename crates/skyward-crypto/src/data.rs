@@ -178,17 +178,48 @@ pub fn reach_unmounted(keys: Option<&KeyService>) -> Result<Reached> {
     reach(keys, &table()?)
 }
 
-/// Show the owner's shared storage at /sdcard; shown already, it stays.
+/// Show the owner's shared storage at /sdcard, in place of what keeps it
+/// from taking files until then; shown already, it stays.
 fn show_owner_storage() -> Result<()> {
     let at = Path::new(SDCARD);
-    if mount::is_mount_point(at)? {
+    if storage_shown(at)? {
         return Ok(());
+    }
+    if mount::is_mount_point(at)? {
+        mount::umount(at)?;
     }
     mount::bind(&Path::new(SHARED_STORAGE).join(OWNER.to_string()), at)
 }
 
+/// Whether what shows at `at` is the owner's shared storage, a folder of
+/// the data partition, rather than what keeps /sdcard from taking files.
+fn storage_shown(at: &Path) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    if !mount::is_mount_point(at)? {
+        return Ok(false);
+    }
+    let device = |path: &Path| std::fs::metadata(path).map(|m| m.dev()).with_context(|| format!("look at {}", path.display()));
+    Ok(device(at)? == device(Path::new(MOUNT))?)
+}
+
+/// Keep /sdcard from taking files while the owner's shared storage does not
+/// show there. A recovery's /sdcard is a folder of its ramdisk, held in the
+/// phone's memory, so a large file a computer pushes there before the
+/// storage shows fills the memory the recovery runs in. An empty
+/// filesystem that takes nothing goes there instead, for such a push to be
+/// turned down at once; the storage takes its place as it shows.
+pub fn guard_storage() -> Result<()> {
+    let at = Path::new(SDCARD);
+    if mount::is_mount_point(at)? {
+        return Ok(());
+    }
+    let options = ["ro", "nosuid", "nodev", "noexec", "size=4k", "mode=0555"].map(str::to_string);
+    mount::mount(Path::new("tmpfs"), at, "tmpfs", &options)
+}
+
 /// Close what opening the partition opened, where the recovery opened it:
-/// /sdcard, the partition's mount, and the device it is read through.
+/// /sdcard, the partition's mount, and the device it is read through. What
+/// keeps /sdcard from taking files goes back there.
 pub fn close() -> Result<()> {
     for at in [SDCARD, MOUNT] {
         if mount::is_mount_point(Path::new(at))? {
@@ -198,7 +229,7 @@ pub fn close() -> Result<()> {
     if dm::status(MAPPED)?.is_some() {
         dm::remove(MAPPED)?;
     }
-    Ok(())
+    guard_storage()
 }
 
 /// A user whose own files are still closed: who, the kind of screen lock
@@ -220,6 +251,10 @@ pub struct Opening {
     pub mounted: Option<Opened>,
     /// The users whose own files are still closed, the owner first.
     pub closed: Vec<Closed>,
+    /// No system has started from the partition since it was made: it
+    /// holds no internal storage, which the system makes as it first
+    /// starts from it.
+    pub fresh: bool,
 }
 
 /// Open the data partition as far as it opens with nothing a user knows:
@@ -247,10 +282,11 @@ pub fn open_without_credential(keys: Option<&KeyService>) -> Result<Opening> {
         false => None,
     };
     let Some(shared) = shared else {
-        if Path::new(SHARED_STORAGE).join(OWNER.to_string()).is_dir() {
+        let fresh = !Path::new(SHARED_STORAGE).join(OWNER.to_string()).is_dir();
+        if !fresh {
             show_owner_storage()?;
         }
-        return Ok(Opening { mounted, closed: Vec::new() });
+        return Ok(Opening { mounted, closed: Vec::new(), fresh });
     };
     let service = key_service(keys)?;
     open_shared(service, shared)?;
@@ -268,7 +304,7 @@ pub fn open_without_credential(keys: Option<&KeyService>) -> Result<Opening> {
             Some(lock) => closed.push(Closed { user, lock: lock.kind, made_up: made_up(user, &protector.id), why: None }),
         }
     }
-    Ok(Opening { mounted, closed: open_made_up(service, closed, &owner) })
+    Ok(Opening { mounted, closed: open_made_up(service, closed, &owner), fresh: false })
 }
 
 /// Open the own files of `user` with what they typed at their screen lock

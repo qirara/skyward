@@ -69,6 +69,14 @@ impl App {
         self.refresh();
     }
 
+    /// The data partition opened, but no system has started from it since
+    /// it was made: it holds nothing, internal storage among it, until the
+    /// system makes it, as one erased here does.
+    pub fn data_made_afresh(&mut self) {
+        self.state.data = Data::Erased;
+        self.refresh();
+    }
+
     /// The data partition did not open, and why.
     pub fn data_failed(&mut self, why: String) {
         self.state.data = Data::Failed(why);
@@ -258,5 +266,16 @@ mod tests {
         app.data_failed("KeyMint is not running".into());
         assert_eq!(tap(&mut app, &f, &i, Action::OpenData), vec![Effect::OpenData]);
         assert_eq!(app.state.data, Data::Opening);
+    }
+
+    #[test]
+    fn a_partition_no_system_has_started_from_offers_no_internal_storage() {
+        let mut app = App::new(Screen::Decrypt, W, H, PPD);
+        app.arrive();
+        app.data_waiting(None);
+        assert!(app.state.data.storage_open());
+        app.data_made_afresh();
+        assert_eq!(app.state.data, Data::Erased);
+        assert!(!app.state.data.storage_open(), "none to offer the computer or the pages, until the system makes it");
     }
 }

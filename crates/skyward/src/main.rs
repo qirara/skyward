@@ -895,6 +895,13 @@ fn recovery() -> Result<()> {
             Ok(done) => skyward_sys::kmsg(&format!("the CPUs run as the system runs them: {}", done.join(", ")))?,
             Err(e) => skyward_sys::kmsg(&format!("the CPUs run as the kernel started them: {e:#}"))?,
         }
+        // Until internal storage shows at /sdcard, what a computer pushes
+        // there is turned down rather than held in the phone's memory. The
+        // recovery works either way, so a failure goes to the kernel log.
+        #[cfg(target_os = "android")]
+        if let Err(e) = skyward_crypto::data::guard_storage() {
+            skyward_sys::kmsg(&format!("/sdcard takes files into memory until internal storage shows: {e:#}"))?;
+        }
         #[cfg(target_os = "android")]
         {
             use skyward_ui::app::Screen;

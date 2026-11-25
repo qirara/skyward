@@ -90,13 +90,32 @@
 - **内存不到 16 GB 时**：Android 14 的 soong 分析在 15 GB 内存上会被 OOM 杀掉，这台构建机上做了两件只影响编译环境、不影响镜像内容的事。一是在 `build/blueprint/bootstrap/command.go` 给 `soong_build` 加 `debug.SetMemoryLimit(11 << 30)`（它在 `env -i` 下运行，`GOMEMLIMIT` 传不进去）。二是在 recovery 用不到的目录里放 `.find-ignore`，让 soong 不分析它们：`cts`、`development`（`development/sdk` 除外）、`test`（`test/app_compat` 除外，里面有 `csuite_test` 插件）、`external/noto-fonts`、`external/cronet`、`tools/` 下的测试工具、Java/应用类的主线模块，以及名为 `tests`、`test`、`vts` 的目录。下面这些被其他模块用到，必须保留：`packages/modules/Media`、`external/avb/test`、ART 的测试目录、`system/sepolicy/tests`（`fc_sort`）、`test/vts-testcase/hal/treble/vintf/libvts_vintf_test_common`、`packages/modules/Connectivity/staticlibs/netd/libnetdutils` 和 `.../staticlibs/native/bpf_headers`。磁盘不够时还删了用不到的预编译件：另外四个 clang 版本、rust 的 1.73/1.74、macOS/musl/Windows 版本、ABI dump、VNDK 快照、JDK 11/21。
 - **检验**：镜像是 boot header v2，大小正好是 recovery 分区（81788928 字节），末尾有 AVB footer；里面的内核与设备树的原厂内核逐字节相同。用它和 `devices/p3q.toml` 打包 Skyward 成功，镜像内容 72.0 MB，还剩 9.8 MB 放 WLAN 驱动、固件和库。同时得到的还有 Odin 用的 `OrangeFox-R12.0-Unofficial-p3q.img.tar` 和 OrangeFox 的安装 zip。
 
-## 四、没有验证的部分
+## 四、真机测试
 
-本移植没有在真机上运行过，下面这些需要在手机上确认：
+在一台 SC-52B（docomo 的 S21 Ultra 5G）上试过：系统是移植到这台手机上的 One UI 8.5（Android 16，vendor 仍是原厂 Android 11 的，VNDK 30），recovery 是构建在上面那份 OrangeFox 基底上的 Skyward。
 
-- OrangeFox 基底本身也没有在手机上启动过：先单独刷入它，确认能进入 OrangeFox、触摸和 adb 正常，再刷构建在它上面的 Skyward。
+已经确认：
 
+- OrangeFox 基底能启动；构建在它上面的 Skyward 能显示、触摸，adb 正常，能导出日志。
+- 面板按 `1440x3200@120HS` 运行（内核日志的 `__ss_vrr`），三星的 LFD 让它在画面静止时可以降到 10 Hz。Skyward 总是选用首选分辨率下刷新率最高的模式，不需要另外设置。
+- system、vendor、product、odm（都是 erofs）、apnhlos 和 persist 能挂载，`ro.hardware.*` 从已安装系统补上；qseecomd、ssgtzd、Keymaster 4.0、Gatekeeper 1.0 能启动。
+- data 分区直接从 `sda35` 按 f2fs 挂载成功：这个移植的 fstab 虽然有 `keydirectory=`，data 实际上没有 metadata 加密，只有逐个文件的加密。
+- U 盘（exFAT）通过三星的 sdfat 驱动只读显示。
+
+在手机上发现并已经修复：
+
+- 黑屏：三星的面板（这台是 S6E3HAD）不像小米的面板那样用属性给出正常亮度的上限，而是给出各级亮度的表 `samsung,candela_map_table_revX`，表的最后一级就是上限（背光 561 级中的 255 级）。以前读不到上限，Skyward 启动就出错退出，init 一次次重启它，屏幕一直不亮。
+- OrangeFox 的 ramdisk 没有 `/system/etc/vintf`，recovery 提供的服务清单写不进去；现在先建这个目录。
+- Keymaster 反复退出：OrangeFox 的 init 把 `/system/bin/bootstrap/linker64` 链接到它自己的链接器，Skyward 却改成指向已安装系统的链接器，recovery 自己的 hwservicemanager 于是用别的系统的链接器加载自己的库，每次有服务注册都崩溃。现在第三方基底上不动链接器和 SELinux 标签，不再同时启动已安装系统的 hwservicemanager，而是重启 recovery 自己的那个，等它就绪后才启动 Keymaster。
+- U 盘读不了：三星的内核用自己的 sdfat 读 exFAT，用旧的 ntfs 驱动读 NTFS，现在这两个也会尝试。
+- 解密停在读 `/data/unencrypted/mode`：三星的 vold 不写这个文件。现在没有它时，按 fstab 的 `fileencryption=` 判断密钥是否由硬件包装，和 vold 自己的做法一样，旧格式里单独的 `wrappedkey` 也算上。这一项还没有在手机上试过。
+
+还没有确认，或者还不能用：
+
+- 解密的其余步骤：用 Keymaster 解开 `/data/unencrypted/key` 并和 `ref` 核对，再解开 `/data/misc/vold/user_keys` 里每个用户的密钥。这台手机上 Keymaster 还没有真正解开过任何密钥。第三方 recovery 通常只能解密 AOSP 类 ROM 的 data，三星自己的系统加密的 data 一般解不开；这里会不会也是这样，还要看手机上的结果。
+- hermesd（三星 Gatekeeper 的存储）的参数是 `/data/vendor/gatekeeper`，data 解开之前没有这个目录，它每秒退出一次，日志里一连串 `hermesd ... exit status: 1` 就是这个；data 解开以后它能否正常运行还没有看到。
+- 恢复出厂设置：这个移植的 fstab 去掉了 userdata 行的 `formattable`（`check,,fileencryption` 中间空着的就是原来的位置，原厂 fstab 有这个标志）。Skyward 只清除系统启动时会重新建立的 data 分区，也就是手机的表标为 `formattable` 的，所以拒绝清除。
+- 时间：persist 和 efs 里都没有时间偏移文件（`time/`），recovery 里的时钟没有设置。
+- WLAN：基底的内核没有 `dhd`，需要按第三节准备和基底内核匹配的 `dhd.ko` 和固件，现在 Skyward 报告 `dhd.ko is in none of ["/lib/modules"]`。`dhd.ko` 如果按 `DHD_LINUX_STD_FW_API` 编译（PCIe 默认如此），会通过内核的固件加载器请求 `bcmdhd_sta.bin`、`nvram.txt`、`bcmdhd_clm.blob`；如果 `dmesg` 里有 `request_firmware` 失败，就在 `[wlan]` 里用 `firmware` 把这些名字映射到 `system/etc/wifi` 下的文件。
 - 显示密度按同分辨率、尺寸相近的小米 13 Ultra 取 560，没有设置圆角半径。
-- WLAN：`dhd.ko` 如果按 `DHD_LINUX_STD_FW_API` 编译（PCIe 默认如此），会通过内核的固件加载器请求 `bcmdhd_sta.bin`、`nvram.txt`、`bcmdhd_clm.blob`；如果 `dmesg` 里有 `request_firmware` 失败，就在 `[wlan]` 里用 `firmware` 把这些名字映射到 `system/etc/wifi` 下的文件。
-- 解密：从原厂 init 脚本读出要启动的程序已经用测试核对过，Keymaster/Gatekeeper 在这台手机上的实际运行没有验证；`[firmware]` 的 apnhlos 和 `[partitions]` 的 persist 分区名按三星骁龙机型的惯例填写。
 - 备份 EFS 时包含 efs、sec_efs、modemst1、modemst2、fsg、fsc、persist；手机上缺少其中任何一个分区时备份会停止，需要按 `/dev/block/by-name` 调整。

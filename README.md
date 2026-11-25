@@ -145,9 +145,12 @@ on a recovery of another make built for it, OrangeFox's or TWRP's: a base Samsun
 does not hand out, which whoever builds the image provides, and which the device
 file's `[base]` checks by its SHA-256. The phone has no slots and no fastboot, and
 is flashed with Odin or Heimdall. The configuration draws on the port in
-[yanzihan/Skyward-Galaxy](https://github.com/yanzihan/Skyward-Galaxy), and has not
-been tried on the phone; the port's notes and a security review of the repositories
-it draws on are in [docs/samsung-p3q.zh-CN.md](docs/samsung-p3q.zh-CN.md), in Chinese.
+[yanzihan/Skyward-Galaxy](https://github.com/yanzihan/Skyward-Galaxy), and has been
+tried on an SC-52B running a port of One UI 8.5: the screen, touch, adb and USB
+drives work, opening the data partition and erasing it do not yet, and the WLAN
+takes a driver added to the image. The port's notes, how it fared on the phone and
+a security review of the repositories it draws on are in
+[docs/samsung-p3q.zh-CN.md](docs/samsung-p3q.zh-CN.md), in Chinese.
 
 | Device | Codename | Built on |
 | --- | --- | --- |

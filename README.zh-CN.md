@@ -120,7 +120,7 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 
 ### 🚧 三星
 
-三星的 recovery 不能在这台手机上启动 Skyward，所以镜像构建在为它构建的第三方 recovery（OrangeFox 或 TWRP）之上：这份基底镜像不由三星分发，构建者自己提供，设备配置的 `[base]` 按 SHA-256 核对它。手机没有 A/B 槽位，不使用 fastboot，用 Odin 或 Heimdall 刷入。配置参考了 [yanzihan/Skyward-Galaxy](https://github.com/yanzihan/Skyward-Galaxy) 的移植，还没有在真机上验证；移植说明和对参考仓库的安全审计见 [docs/samsung-p3q.zh-CN.md](docs/samsung-p3q.zh-CN.md)。
+三星的 recovery 不能在这台手机上启动 Skyward，所以镜像构建在为它构建的第三方 recovery（OrangeFox 或 TWRP）之上：这份基底镜像不由三星分发，构建者自己提供，设备配置的 `[base]` 按 SHA-256 核对它。手机没有 A/B 槽位，不使用 fastboot，用 Odin 或 Heimdall 刷入。配置参考了 [yanzihan/Skyward-Galaxy](https://github.com/yanzihan/Skyward-Galaxy) 的移植，在一台运行移植版 One UI 8.5 的 SC-52B 上试过：屏幕、触摸、adb 和 U 盘可以用，解密 data 分区和恢复出厂设置还不行，WLAN 要另外加入驱动；移植说明、真机测试情况和对参考仓库的安全审计见 [docs/samsung-p3q.zh-CN.md](docs/samsung-p3q.zh-CN.md)。
 
 | 机型 | 代号 | 构建所用的基底 |
 | --- | --- | --- |

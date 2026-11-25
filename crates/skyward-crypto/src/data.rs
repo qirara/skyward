@@ -237,17 +237,23 @@ pub fn open_without_credential(keys: Option<&KeyService>) -> Result<Opening> {
     };
     // A phone whose table has no file of the partition encrypted reads
     // every name and every file as it is: there is no key to let in, and
-    // nobody's own files stay closed. The owner's shared storage shows
-    // once the system has made it, which it has not on a partition made
-    // afresh that the phone has not started from yet.
-    if !encryption::files(&entries) {
+    // nobody's own files stay closed. So does one whose system, for all its
+    // table says, encrypted none of the folders its init encrypts first.
+    // The owner's shared storage shows once the system has made it, which
+    // it has not on a partition made afresh that the phone has not started
+    // from yet.
+    let shared = match encryption::files(&entries) {
+        true => shared_folders_key()?,
+        false => None,
+    };
+    let Some(shared) = shared else {
         if Path::new(SHARED_STORAGE).join(OWNER.to_string()).is_dir() {
             show_owner_storage()?;
         }
         return Ok(Opening { mounted, closed: Vec::new() });
-    }
+    };
     let service = key_service(keys)?;
-    open_shared(service)?;
+    open_shared(service, shared)?;
     let mut closed = Vec::new();
     let mut owner = Note::default();
     for user in open_users(service)? {
@@ -330,9 +336,69 @@ fn file_mode() -> Result<String> {
     }
 }
 
-/// Let in the key for the files that belong to no one user. Until it is
-/// in, most of what the data partition holds reads as scrambled names.
-fn open_shared(service: &KeyService) -> Result<[u8; crate::fscrypt::NAME_BYTES]> {
+/// Folders the system's init makes encrypted under the key of no one user,
+/// before anything is put in them, wherever its table has files encrypted
+/// one by one.
+const SHARED_FOLDERS: [&str; 5] = ["/data/misc", "/data/system", "/data/vendor", "/data/app", "/data/local"];
+
+/// The key the folders that belong to no one user are encrypted under, as
+/// the kernel names it: none where the system left them plain, or has not
+/// made them yet, as on a partition made afresh that no system has started
+/// from.
+fn shared_folders_key() -> Result<Option<crate::fscrypt::KeyName>> {
+    for folder in SHARED_FOLDERS.map(Path::new).into_iter().filter(|f| f.is_dir()) {
+        if let Some(key) = crate::fscrypt::key_of(folder)? {
+            return Ok(Some(key));
+        }
+    }
+    Ok(None)
+}
+
+/// What the data partition and /metadata hold where the keys are looked
+/// for, by name alone and a line to each folder, for a phone whose vold
+/// keeps them elsewhere than Android's does to be made out from the log.
+pub fn layout() -> Vec<String> {
+    fn names(dir: &Path, depth: usize, lines: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            lines.push(format!("{} holds nothing to read", dir.display()));
+            return;
+        };
+        let mut found: Vec<(String, bool)> =
+            entries.flatten().map(|e| (e.file_name().to_string_lossy().into_owned(), e.path().is_dir())).collect();
+        found.sort();
+        lines.push(format!("{} holds [{}]", dir.display(), found.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")));
+        if depth > 0 {
+            for (name, _) in found.iter().filter(|(_, is_dir)| *is_dir) {
+                names(&dir.join(name), depth - 1, lines);
+            }
+        }
+    }
+    let mut lines = vec![match shared_folders_key() {
+        Ok(Some(key)) => format!("the folders of no one user are encrypted under the key {key}"),
+        Ok(None) => "the folders of no one user are plain".to_string(),
+        Err(e) => format!("how the folders of no one user are encrypted is not known: {e:#}"),
+    }];
+    names(Path::new(MOUNT), 0, &mut lines);
+    let metadata = Path::new("/metadata");
+    match mount::is_mount_point(metadata) {
+        Ok(true) => {
+            names(metadata, 0, &mut lines);
+            names(&metadata.join("vold"), 2, &mut lines);
+        }
+        Ok(false) => lines.push("/metadata is not mounted".to_string()),
+        Err(e) => lines.push(format!("whether /metadata is mounted is not known: {e:#}")),
+    }
+    lines
+}
+
+/// Let in the key for the files that belong to no one user, which the
+/// folders init makes are encrypted under, as `shared` names it. Until it
+/// is in, most of what the data partition holds reads as scrambled names.
+fn open_shared(service: &KeyService, shared: crate::fscrypt::KeyName) -> Result<[u8; crate::fscrypt::NAME_BYTES]> {
+    anyhow::ensure!(
+        Path::new(SHARED_KEY).is_dir(),
+        "the files of no one user are encrypted under the key {shared}, and this phone's vold keeps no key for them in {SHARED_KEY}, where Android's does"
+    );
     let wrapped = crate::fscrypt::hardware_wrapped(&file_mode()?);
     let raw = hardware_key(service, Path::new(SHARED_KEY), wrapped)?;
     let name = crate::fscrypt::add_key(Path::new(MOUNT), &raw, wrapped)?;

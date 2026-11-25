@@ -34,7 +34,18 @@ impl Decryptor {
     pub fn start(job: Job) -> Result<Decryptor> {
         let worker = Worker::start("decrypt", move |tell| {
             tell.tell(match job {
-                Job::Open => Ended::Opened(with_data_keys(data::open_without_credential)),
+                Job::Open => {
+                    let opened = with_data_keys(data::open_without_credential);
+                    // What the partition holds where the keys are looked
+                    // for goes to the log, for a phone whose vold keeps
+                    // them elsewhere to be made out from it.
+                    if opened.is_err() {
+                        for line in data::layout() {
+                            let _ = skyward_sys::kmsg(&format!("where the keys are looked for, {line}"));
+                        }
+                    }
+                    Ended::Opened(opened)
+                }
                 Job::Unlock { closed, user, credential } => {
                     Ended::Unlocked(with_key_service(|service| data::unlock(service, &closed, user, &credential)))
                 }

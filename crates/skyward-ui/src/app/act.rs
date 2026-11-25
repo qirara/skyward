@@ -45,6 +45,11 @@ impl App {
                 let w = self.state.wlan.as_mut().expect("the WLAN switch shows on a phone whose WLAN is brought up");
                 let on = matches!(w.power, Power::Off | Power::Failed(_));
                 *w = Wlan { power: if on { Power::Starting } else { Power::Off }, ..Wlan::default() };
+                // A WLAN that comes on joins a network kept on its own
+                // again, and one going off joins nothing.
+                self.state.auto_joined = false;
+                self.state.join_pending = None;
+                self.state.wlan_resume = false;
                 self.refresh();
                 return vec![Effect::Wlan(on)];
             }
@@ -410,15 +415,14 @@ impl App {
                 match network.security {
                     Security::Wep => self.say(l.pick(texts::toast::WEP_UNSUPPORTED), now),
                     Security::Enterprise => self.say(l.pick(texts::toast::ENTERPRISE_UNSUPPORTED), now),
-                    s if s.password() => self.ask_password(network),
-                    _ => {
-                        return vec![Effect::JoinWlan {
-                            ssid: network.ssid,
-                            name: network.name,
-                            security: network.security,
-                            password: Secret::default(),
-                        }]
-                    }
+                    // A network joined before is joined again with the
+                    // password kept for it; the password page opens only
+                    // for one the recovery has none kept for.
+                    s if s.password() => match self.saved_for(&network).map(|saved| saved.password.clone()) {
+                        Some(password) => return vec![self.join_network(network.ssid, network.name, s, password)],
+                        None => self.ask_password(network),
+                    },
+                    _ => return vec![self.join_network(network.ssid, network.name, network.security, Secret::default())],
                 }
             }
             Action::NetworkDetails(i) => {
@@ -448,6 +452,7 @@ impl App {
                 }
             }
             Action::LeaveNetwork => {
+                self.forget_joined();
                 let mut fx = self.back(now);
                 fx.push(Effect::LeaveWlan);
                 return fx;
@@ -655,7 +660,7 @@ impl App {
                         None => {
                             let password = Secret(std::mem::take(&mut self.state.password));
                             let mut fx = self.back(now);
-                            fx.push(Effect::JoinWlan { ssid: network.ssid, name: network.name, security: network.security, password });
+                            fx.push(self.join_network(network.ssid, network.name, network.security, password));
                             return fx;
                         }
                     }
@@ -685,7 +690,7 @@ impl App {
                                 false => Secret::default(),
                             };
                             let mut fx = self.back(now);
-                            fx.push(Effect::JoinWlan { ssid: name.clone().into_bytes(), name, security, password });
+                            fx.push(self.join_network(name.clone().into_bytes(), name, security, password));
                             return fx;
                         }
                     }

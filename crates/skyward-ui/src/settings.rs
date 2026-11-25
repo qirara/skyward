@@ -5,10 +5,12 @@
 //! a time zone by its name in the tz database, a part or a place by its
 //! name, so a later version that lists them otherwise reads them the same.
 
-use crate::app::{Place, State, SystemZone, SCREEN_OFF, TIME_ZONES};
+use crate::app::{Place, Saved, Secret, State, SystemZone, SAVED_MAX, SCREEN_OFF, TIME_ZONES};
 use crate::Lang;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use skyward_net::supplicant::Security;
+use skyward_net::wlan::Power;
 
 /// How long settings stand unchanged before they are written, so a slider
 /// dragged across the page is written once, after the hand stops.
@@ -58,6 +60,55 @@ pub struct Settings {
     pub install: Install,
     pub backup: Backup,
     pub logs: Logs,
+    pub wlan: Wlan,
+}
+
+/// The WLAN as the pages left it: whether it stood on, for it to come on
+/// again on the next start, and the networks joined before, with what
+/// joins them again. The passwords are kept as they were typed, so the
+/// file is the recovery's alone to read.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Wlan {
+    pub on: bool,
+    pub networks: Vec<Network>,
+}
+
+/// A network joined before, as the file keeps it: its name in hex, since
+/// the bytes a network is named by need not be text, how it is protected,
+/// by name, and its password.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct Network {
+    pub ssid: String,
+    pub security: String,
+    pub password: String,
+}
+
+/// What is printed of a network kept leaves its password out.
+impl std::fmt::Debug for Network {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Network").field("ssid", &self.ssid).field("security", &self.security).finish_non_exhaustive()
+    }
+}
+
+/// The protections a network kept may have, by the names the file gives
+/// them: those the recovery joins.
+const SECURITIES: [(Security, &str); 5] =
+    [(Security::Open, "open"), (Security::Owe, "owe"), (Security::Psk, "wpa2"), (Security::Sae, "wpa3"), (Security::PskSae, "wpa2wpa3")];
+
+impl Network {
+    /// The network `saved` keeps, as the file holds it.
+    fn of(saved: &Saved) -> Option<Network> {
+        let (_, security) = SECURITIES.iter().find(|(s, _)| *s == saved.security)?;
+        Some(Network { ssid: hex::encode(&saved.ssid), security: security.to_string(), password: saved.password.0.clone() })
+    }
+
+    /// The network kept, where it is one the recovery joins.
+    fn saved(&self) -> Option<Saved> {
+        let (security, _) = SECURITIES.iter().find(|(_, name)| *name == self.security)?;
+        let ssid = hex::decode(&self.ssid).ok().filter(|ssid| !ssid.is_empty() && ssid.len() <= 32)?;
+        Some(Saved { ssid, security: *security, password: Secret(self.password.clone()) })
+    }
 }
 
 /// The install page's options.
@@ -146,6 +197,15 @@ impl Settings {
                 verify: state.verify,
             },
             logs: Logs { kinds: names(&state.logs, &LOGS), to: LOG_PLACES[state.logs_to].to_string() },
+            wlan: Wlan {
+                // One that has not told how it stands stands as it did; one
+                // that failed to come up still stood on, and is tried again.
+                on: match &state.wlan {
+                    Some(w) => w.power != Power::Off,
+                    None => state.wlan_resume,
+                },
+                networks: state.saved_networks.iter().filter_map(Network::of).collect(),
+            },
         }
     }
 
@@ -210,6 +270,8 @@ impl Settings {
         if let Some(at) = LOG_PLACES.iter().position(|place| *place == self.logs.to) {
             state.logs_to = at;
         }
+        state.saved_networks = self.wlan.networks.iter().filter_map(Network::saved).take(SAVED_MAX).collect();
+        state.wlan_resume = self.wlan.on;
     }
 }
 
@@ -345,6 +407,34 @@ mod tests {
         assert_eq!((back.lang, back.screen_off, back.time_zone), (Lang::En, 6, zone("America/New_York")));
         assert!(!back.follow_system_zone);
         assert_eq!(back.system_zone, state.system_zone, "a zone of the system's that the pages do not list");
+    }
+
+    #[test]
+    fn the_wlan_and_the_networks_joined_are_kept_between_starts() {
+        use skyward_net::wlan::Wlan as Told;
+        let kept = |name: &[u8], security, password: &str| Saved { ssid: name.to_vec(), security, password: Secret(password.into()) };
+        let networks = vec![kept(b"Skyward", Security::Psk, "secret12"), kept(&[0xff, 0x00, b'a'], Security::Open, "")];
+        let state = State { wlan: Some(Told { power: Power::On, ..Told::default() }), saved_networks: networks.clone(), ..State::default() };
+        let text = Settings::of(&state).text();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["wlan"]["on"], true);
+        assert_eq!(json["wlan"]["networks"][0], serde_json::json!({"ssid": "536b7977617264", "security": "wpa2", "password": "secret12"}));
+        assert_eq!(json["wlan"]["networks"][1]["ssid"], "ff0061", "a name that is not text, as its bytes");
+        let read = Settings::read(&text).unwrap();
+        assert!(!format!("{read:?}").contains("secret12"), "what is printed of the settings leaves the passwords out");
+        let mut back = State::default();
+        read.apply(&mut back);
+        assert_eq!((back.saved_networks, back.wlan_resume), (networks, true), "the WLAN comes on again and joins them");
+        // One the recovery does not join, or whose name no network has, is
+        // left out.
+        let odd = r#"{"wlan": {"on": false, "networks": [
+            {"ssid": "536b7977617264", "security": "wep", "password": "x"},
+            {"ssid": "not hex", "security": "wpa2", "password": "secret12"},
+            {"ssid": "", "security": "open", "password": ""}]}}"#;
+        let mut back = State::default();
+        Settings::read(odd).unwrap().apply(&mut back);
+        assert_eq!((back.saved_networks.len(), back.wlan_resume), (0, false));
+        assert!(Settings::of(&State { wlan_resume: true, ..State::default() }).wlan.on, "as it stood, before the WLAN tells");
     }
 
     #[test]

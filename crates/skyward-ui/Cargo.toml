@@ -25,7 +25,9 @@ icu_plurals = "2.4.0"
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always"] }
 # Screenshots are saved as PNG.
 png = "0.17.16"
-# The settings are kept between starts as a JSON file.
+# The settings are kept between starts as a JSON file, a network's name
+# in it as hex, since the bytes it is need not be text.
+hex = { workspace = true }
 serde = { workspace = true }
 serde_json = "1.0.154"
 skyward-info = { path = "../skyward-info" }

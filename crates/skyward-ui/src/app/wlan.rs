@@ -14,6 +14,30 @@ impl std::fmt::Debug for Secret {
     }
 }
 
+/// A network joined before, with what joins it again: the password as it
+/// was typed, which what is printed of it leaves out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Saved {
+    pub ssid: Vec<u8>,
+    pub security: Security,
+    pub password: Secret,
+}
+
+impl Saved {
+    /// Whether this joins `network` again: one of the same name the
+    /// recovery joins, protected as it was or, for a password, by any
+    /// protection that takes one, as a network that went from WPA2 to WPA2
+    /// and WPA3 together still takes the password it had.
+    pub fn joins(&self, network: &Network) -> bool {
+        self.ssid == network.ssid
+            && network.security.joinable()
+            && (self.security == network.security || (self.security.password() && network.security.password()))
+    }
+}
+
+/// How many networks joined before are kept, the last joined first.
+pub const SAVED_MAX: usize = 32;
+
 /// A network being added by hand, as its page shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Adding {
@@ -49,17 +73,100 @@ pub(super) fn refused(l: Lang, security: Security, password: &str) -> Option<&'s
 }
 
 impl App {
-    /// How the WLAN stands, as the runtime last told it.
-    pub fn set_wlan(&mut self, w: Wlan) {
+    /// How the WLAN stands, as the runtime last told it, and what that asks
+    /// for: a WLAN that stood on as the recovery last ran comes on again as
+    /// soon as the runtime tells it is there, and one on and joined to
+    /// nothing joins the strongest network kept that it found, on its own,
+    /// once each time it comes on. A network that took the password it was
+    /// joined with is kept with it, and one that turned it down forgotten.
+    pub fn set_wlan(&mut self, w: Wlan) -> Vec<Effect> {
         if self.state.wlan.as_ref() == Some(&w) {
-            return;
+            return Vec::new();
         }
+        self.learn(&w);
+        let mut fx = Vec::new();
+        let w = match w.power {
+            Power::Off if std::mem::take(&mut self.state.wlan_resume) => {
+                fx.push(Effect::Wlan(true));
+                Wlan { power: Power::Starting, ..Wlan::default() }
+            }
+            Power::Off | Power::Failed(_) => {
+                self.state.auto_joined = false;
+                w
+            }
+            _ => w,
+        };
         self.state.wlan = Some(w);
+        fx.extend(self.auto_join());
         if matches!(self.screen(), Screen::Home | Screen::Wlan | Screen::WlanNetwork | Screen::Update | Screen::SkywardUpdate) {
             self.refresh();
         }
         // The status bar shows the network joined over every page.
         self.dirty = true;
+        fx
+    }
+
+    /// What the runtime told of the network being joined: once it is
+    /// joined, the password it took is kept to join it again; once it turns
+    /// the password down, a password kept for it is forgotten.
+    fn learn(&mut self, w: &Wlan) {
+        let Some(joined) = &w.joined else { return };
+        let ours = |pending: &mut Saved| pending.ssid == joined.ssid;
+        match joined.stage {
+            Joining::Addressing | Joining::Connected(_) | Joining::NoAddress(_) => {
+                if let Some(pending) = self.state.join_pending.take_if(ours) {
+                    let saved = &mut self.state.saved_networks;
+                    saved.retain(|s| s.ssid != pending.ssid);
+                    saved.insert(0, pending);
+                    saved.truncate(SAVED_MAX);
+                }
+            }
+            Joining::WrongPassword => {
+                self.state.join_pending.take_if(ours);
+                self.state.saved_networks.retain(|s| s.ssid != joined.ssid);
+            }
+            Joining::NotFound | Joining::Failed => {
+                self.state.join_pending.take_if(ours);
+            }
+            Joining::Joining => {}
+        }
+    }
+
+    /// Join the strongest network kept that the WLAN found, where it is on
+    /// and joined to nothing, nothing else is being joined or typed for,
+    /// and none was joined on its own since it came on.
+    fn auto_join(&mut self) -> Option<Effect> {
+        let s = &self.state;
+        let w = s.wlan.as_ref()?;
+        if s.auto_joined || w.power != Power::On || w.joined.is_some() || s.join_pending.is_some() || s.joining.is_some() || s.adding.is_some() {
+            return None;
+        }
+        let (network, saved) = w.networks.iter().filter_map(|n| Some((n, self.saved_for(n)?))).max_by_key(|(n, _)| n.signal)?;
+        let (network, password) = (network.clone(), saved.password.clone());
+        self.state.auto_joined = true;
+        Some(self.join_network(network.ssid, network.name, network.security, password))
+    }
+
+    /// The network kept that joins `network` again, if one does.
+    pub(super) fn saved_for(&self, network: &Network) -> Option<&Saved> {
+        self.state.saved_networks.iter().find(|s| s.joins(network))
+    }
+
+    /// Join a network with `password`, which is held until the network
+    /// takes it, to keep, or turns it down.
+    pub(super) fn join_network(&mut self, ssid: Vec<u8>, name: String, security: Security, password: Secret) -> Effect {
+        self.state.join_pending = Some(Saved { ssid: ssid.clone(), security, password: password.clone() });
+        Effect::JoinWlan { ssid, name, security, password }
+    }
+
+    /// Forget the password kept for the network joined, as its page's
+    /// button says, and leave it.
+    pub(super) fn forget_joined(&mut self) {
+        let joined = self.state.wlan.as_ref().and_then(|w| w.joined.as_ref()).map(|j| j.ssid.clone());
+        if let Some(ssid) = joined {
+            self.state.saved_networks.retain(|s| s.ssid != ssid);
+            self.state.join_pending.take_if(|p| p.ssid == ssid);
+        }
     }
 
     /// How fast data went over the network joined in the last second, which
@@ -140,6 +247,70 @@ mod tests {
         assert_eq!(app.screen(), Screen::Wlan);
         assert_eq!(tap(&mut app, &f, &i, Action::Toggle(Switch::Wlan)), vec![Effect::Wlan(false)]);
         assert_eq!(app.state.wlan, Some(Wlan::default()));
+    }
+
+    #[test]
+    fn a_network_joined_is_kept_with_its_password_and_joined_again_when_the_wlan_comes_on() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let home = || Wlan { power: Power::On, networks: vec![network("Cafe", -50, Security::Open), network("Skyward", -40, Security::Psk)], joined: None };
+        app.state.wlan = Some(home());
+        app.act(Action::Open(Screen::Wlan), 0);
+        tap(&mut app, &f, &i, Action::JoinNetwork(1));
+        let type_in = |app: &mut App, text: &str| {
+            for ch in text.chars() {
+                tap(app, &f, &i, Action::Type(Cap::Char(ch)));
+            }
+        };
+        type_in(&mut app, "secret");
+        tap(&mut app, &f, &i, Action::Type(Cap::Show(Layer::Digits)));
+        type_in(&mut app, "12");
+        tap(&mut app, &f, &i, Action::Type(Cap::Enter));
+        assert!(app.state.saved_networks.is_empty(), "not kept before the network takes it");
+        app.set_wlan(joined("Skyward", Joining::Joining));
+        app.set_wlan(joined("Skyward", Joining::Addressing));
+        let kept = Saved { ssid: b"Skyward".to_vec(), security: Security::Psk, password: Secret("secret12".into()) };
+        assert_eq!(app.state.saved_networks, std::slice::from_ref(&kept), "kept once the network took the password");
+        assert_eq!(format!("{kept:?}"), r#"Saved { ssid: [83, 107, 121, 119, 97, 114, 100], security: Psk, password: Secret(8 characters) }"#);
+        // Off and on again, the network kept is joined on its own, once.
+        assert_eq!(tap(&mut app, &f, &i, Action::Toggle(Switch::Wlan)), vec![Effect::Wlan(false)]);
+        assert!(app.set_wlan(Wlan::default()).is_empty());
+        assert_eq!(tap(&mut app, &f, &i, Action::Toggle(Switch::Wlan)), vec![Effect::Wlan(true)]);
+        assert!(app.set_wlan(Wlan { power: Power::On, ..Wlan::default() }).is_empty(), "nothing found yet");
+        let again = Effect::JoinWlan { ssid: b"Skyward".to_vec(), name: "Skyward".into(), security: Security::Psk, password: Secret("secret12".into()) };
+        assert_eq!(app.set_wlan(home()), vec![again.clone()], "the strongest network kept is joined, not the open one");
+        app.set_wlan(connected("Skyward"));
+        assert!(app.set_wlan(home()).is_empty(), "a network left is not joined again on its own until the WLAN comes on again");
+        // Its row joins it with the password kept.
+        assert_eq!(tap(&mut app, &f, &i, Action::JoinNetwork(1)), vec![again], "no password page for a network kept");
+        assert_eq!(app.screen(), Screen::Wlan);
+        // A password the network turns down is forgotten, and asked for.
+        app.set_wlan(joined("Skyward", Joining::WrongPassword));
+        assert!(app.state.saved_networks.is_empty());
+        app.set_wlan(home());
+        tap(&mut app, &f, &i, Action::JoinNetwork(1));
+        assert_eq!(app.screen(), Screen::WlanPassword);
+    }
+
+    #[test]
+    fn a_wlan_that_stood_on_comes_on_again_and_a_network_forgotten_is_not_kept() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let kept = Saved { ssid: b"Skyward".to_vec(), security: Security::Sae, password: Secret("secret12".into()) };
+        app.state.saved_networks = vec![kept];
+        app.state.wlan_resume = true;
+        assert_eq!(app.set_wlan(Wlan::default()), vec![Effect::Wlan(true)], "it comes on as soon as the runtime tells it is there");
+        assert_eq!(app.state.wlan.as_ref().unwrap().power, Power::Starting);
+        // Now WPA2 and WPA3 both: the password kept still joins it.
+        let found = Wlan { power: Power::On, networks: vec![network("Skyward", -40, Security::PskSae)], joined: None };
+        let join = Effect::JoinWlan { ssid: b"Skyward".to_vec(), name: "Skyward".into(), security: Security::PskSae, password: Secret("secret12".into()) };
+        assert_eq!(app.set_wlan(found), vec![join]);
+        app.set_wlan(connected("Skyward"));
+        assert_eq!(app.state.saved_networks.len(), 1);
+        app.act(Action::Open(Screen::Wlan), 0);
+        tap(&mut app, &f, &i, Action::OpenJoined);
+        assert_eq!(tap(&mut app, &f, &i, Action::LeaveNetwork), vec![Effect::LeaveWlan]);
+        assert!(app.state.saved_networks.is_empty(), "its page's button forgets the network");
     }
 
     #[test]

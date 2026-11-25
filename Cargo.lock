@@ -2802,6 +2802,7 @@ dependencies = [
  "deunicode",
  "drm",
  "drm-ffi",
+ "hex",
  "icu_casemap",
  "icu_locale_core",
  "icu_plurals",

@@ -1588,7 +1588,7 @@ impl<'a> Pages<'a> {
         self.backup_told(now);
         self.merge_told(now)?;
         self.systems_told(now)?;
-        self.wlan_told()?;
+        self.wlan_told(now)?;
         self.keep_settings(now)?;
         self.updates_told(now)?;
         self.skyward_told(now)?;
@@ -2177,10 +2177,16 @@ impl Pages<'_> {
 
     /// What the WLAN told; its page scans again now and then while it
     /// shows, as the stock settings do.
-    fn wlan_told(&mut self) -> Result<()> {
+    fn wlan_told(&mut self, now: u64) -> Result<()> {
         if let Some((told, traffic)) = self.wlan.as_ref().map(wlan::Worker::told) {
             if let Some(w) = told {
-                self.app.set_wlan(w);
+                // A WLAN that stood on comes on again, and one on joins a
+                // network kept on its own.
+                let mut queue = VecDeque::from(self.app.set_wlan(w));
+                while let Some(fx) = queue.pop_front() {
+                    eprintln!("effect {fx:?}");
+                    queue.extend(self.effect(fx, now)?);
+                }
             }
             if let Some(t) = traffic {
                 self.app.set_traffic(t);

@@ -180,6 +180,18 @@ pub struct State {
     /// network, and whether it shows.
     pub password: String,
     pub show_password: bool,
+    /// The networks joined before, with what joins them again, kept with
+    /// the settings.
+    pub saved_networks: Vec<Saved>,
+    /// The network being joined, with what it is joined with, until it
+    /// takes it or turns it down.
+    pub join_pending: Option<Saved>,
+    /// The WLAN stood on as the recovery last ran, and is to come on again
+    /// once the runtime tells it can.
+    pub wlan_resume: bool,
+    /// A network kept was joined on its own since the WLAN last came on,
+    /// so it is not joined again on its own until the WLAN next comes on.
+    pub auto_joined: bool,
     /// The phone maker's update server is known, and the update page asks
     /// it.
     pub update_server: bool,
@@ -274,6 +286,10 @@ impl Default for State {
             adding: None,
             password: String::new(),
             show_password: false,
+            saved_networks: Vec::new(),
+            join_pending: None,
+            wlan_resume: false,
+            auto_joined: false,
             update_server: false,
             check: Check::Idle,
             have: Have::Nothing,

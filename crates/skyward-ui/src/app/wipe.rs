@@ -120,12 +120,20 @@ impl App {
             erase.done = erase.parts.len();
         }
         erase.progress = None;
-        let data_gone = erase.parts.iter().position(|&p| p == Part::Data).is_some_and(|k| k < erase.done);
+        let gone = |part: Part| erase.parts.iter().position(|&p| p == part).is_some_and(|k| k < erase.done);
+        let (data_gone, metadata_gone) = (gone(Part::Data), gone(Part::Metadata));
         if outcome.is_err() || !erase.asked {
             self.wake(now);
         }
         if data_gone {
             self.state.data = Data::Erased;
+        }
+        // The networks kept, with their passwords, go with /metadata, where
+        // the settings are kept, as a factory reset leaves nothing a user
+        // kept: the settings written there again keep none of them.
+        if metadata_gone {
+            self.state.saved_networks.clear();
+            self.state.join_pending = None;
         }
         self.state.erase.outcome = Some(outcome);
         self.refresh();
@@ -136,6 +144,22 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::testing::*;
+
+    #[test]
+    fn a_factory_reset_forgets_the_networks_kept_and_erasing_parts_of_the_data_partition_does_not() {
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let kept = vec![Saved { ssid: b"Skyward".to_vec(), security: Security::Psk, password: Secret("secret12".into()) }];
+        app.state.saved_networks = kept.clone();
+        app.state.erase = Erase { parts: vec![Part::AppData, Part::Media], ..Erase::default() };
+        app.erase_ended(Ok(()), 0);
+        assert_eq!(app.state.saved_networks, kept, "the parts named leave /metadata as it is");
+        app.state.erase = Erase { reset: true, parts: vec![Part::Data, Part::Cache, Part::Metadata], ..Erase::default() };
+        app.erase_ended(Err(EraseStop::NoCache), 0);
+        assert_eq!(app.state.saved_networks, kept, "a reset that stopped before /metadata");
+        app.state.erase = Erase { reset: true, parts: vec![Part::Data, Part::Cache, Part::Metadata], ..Erase::default() };
+        app.erase_ended(Ok(()), 0);
+        assert!(app.state.saved_networks.is_empty());
+    }
 
     #[test]
     fn the_cant_start_page_retries_looks_around_or_erases() {

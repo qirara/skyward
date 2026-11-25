@@ -72,13 +72,16 @@
 ## 三、构建和刷入
 
 1. 准备基底：p3q 的 OrangeFox 或 TWRP `recovery.img`（recovery 分区的内容）。算出 SHA-256，写进 `devices/p3q.toml` 的 `[base] sha256`。现在写在里面的是下面“编译 OrangeFox 基底”得到的镜像；换用别的基底时改成那份镜像的值。
-2. 准备附加文件（目录结构就是它们在 ramdisk 中的位置）：
+2. WLAN 驱动有两种做法，二选一：
+   - 让 recovery 运行和系统相同的内核：打包时加上 `--kernel <手机 boot 分区的镜像> --dtbo <手机 dtbo 分区的镜像>`（`adb pull /dev/block/by-name/boot`、`dtbo` 得到）。Skyward 加载 vendor 分区自己的 `/vendor/lib/modules/dhd.ko`，固件由 ueventd 从 vendor 分区的 `firmware/wifi` 读取，不需要附加文件。系统换了内核以后，recovery 也要用新的 boot 镜像重新打包。
+   - 仍用基底的内核：准备下面的附加文件。
+3. 准备附加文件（只有仍用基底内核时才需要，目录结构就是它们在 ramdisk 中的位置）：
    - `lib/modules/dhd.ko` 和对应的 `lib/modules/modules.dep`（按上面的建议自己编译）；
-   - `system/etc/wifi/bcmdhd_sta.bin`、`bcmdhd_clm.blob`、`nvram_net.txt`，来自原厂 vendor 分区的 `etc/wifi`；
+   - `bcmdhd_sta.bin`、`bcmdhd_clm.blob`、`nvram.txt`，来自 vendor 分区的 `firmware/wifi`，放在 ramdisk 中 ueventd 会找的固件目录里；
    - 基底内核在 init 之前就请求的触摸固件（参考移植加入了 `lib/firmware/y792_p3.bin`，缺少时启动会等满 60 秒的固件超时）；
    - 只有 vendor 分区被改过的 ROM 才需要：`system/wifi-vndk/lib64/` 下原厂 VNDK 30 的 `android.hardware.wifi*` 库、`libssl.so`、`libcrypto.so`。
-3. 本地构建见 README 的“构建在第三方 recovery 上”。用 CI 的话，在仓库里建一个标签为 `base-images` 的 Release，上传 `p3q-recovery.img` 和 `p3q-files.zip`，并提交 `devices/p3q.files.sha256`（在 zip 解压出的目录里运行 `sha256sum <每个文件>` 的输出）。
-4. 刷入：Odin 取消 Auto Reboot，`.tar.md5` 放 AP 栏，第一次同时把关闭校验的 vbmeta 放 USERDATA 栏；刷完直接按键进入 recovery，因为原厂系统启动时会把 recovery 改回原厂的。
+4. 本地构建见 README 的“构建在第三方 recovery 上”。用 CI 的话，在仓库里建一个标签为 `base-images` 的 Release，上传 `p3q-recovery.img` 和 `p3q-files.zip`，并提交 `devices/p3q.files.sha256`（在 zip 解压出的目录里运行 `sha256sum <每个文件>` 的输出）。
+5. 刷入：Odin 取消 Auto Reboot，`.tar.md5` 放 AP 栏，第一次同时把关闭校验的 vbmeta 放 USERDATA 栏；刷完直接按键进入 recovery，因为原厂系统启动时会把 recovery 改回原厂的。
 
 ### 编译 OrangeFox 基底
 
@@ -99,7 +102,8 @@
 - OrangeFox 基底能启动；构建在它上面的 Skyward 能显示、触摸，adb 正常，能导出日志。
 - 面板按 `1440x3200@120HS` 运行（内核日志的 `__ss_vrr`），三星的 LFD 让它在画面静止时可以降到 10 Hz。Skyward 总是选用首选分辨率下刷新率最高的模式，不需要另外设置。
 - system、vendor、product、odm（都是 erofs）、apnhlos 和 persist 能挂载，`ro.hardware.*` 从已安装系统补上；qseecomd、ssgtzd、Keymaster 4.0、Gatekeeper 1.0 能启动。
-- data 分区直接从 `sda35` 按 f2fs 挂载成功：这个移植的 fstab 虽然有 `keydirectory=`，data 实际上没有 metadata 加密，只有逐个文件的加密。
+- data 分区直接从 `sda35` 按 f2fs 挂载成功：这个移植的 fstab 虽然有 `keydirectory=`，data 实际上没有 metadata 加密。
+- 系统运行的不是三星原厂内核，而是 ROM 用 CI 编译的 `5.4.304-openela-qgki-UN1CA-KSUN`（KernelSU Next）：boot 分区里是 Image 后面接着设备树，dtbo 和 `/vendor/lib/modules` 里的模块都是同一次编译的。`dhd`（`CONFIG_BCM4389=m`）是模块，触摸驱动内置。
 - U 盘（exFAT）通过三星的 sdfat 驱动只读显示。
 
 在手机上发现并已经修复：
@@ -108,14 +112,15 @@
 - OrangeFox 的 ramdisk 没有 `/system/etc/vintf`，recovery 提供的服务清单写不进去；现在先建这个目录。
 - Keymaster 反复退出：OrangeFox 的 init 把 `/system/bin/bootstrap/linker64` 链接到它自己的链接器，Skyward 却改成指向已安装系统的链接器，recovery 自己的 hwservicemanager 于是用别的系统的链接器加载自己的库，每次有服务注册都崩溃。现在第三方基底上不动链接器和 SELinux 标签，不再同时启动已安装系统的 hwservicemanager，而是重启 recovery 自己的那个，等它就绪后才启动 Keymaster。
 - U 盘读不了：三星的内核用自己的 sdfat 读 exFAT，用旧的 ntfs 驱动读 NTFS，现在这两个也会尝试。
-- 解密停在读 `/data/unencrypted/mode`：三星的 vold 不写这个文件。现在没有它时，按 fstab 的 `fileencryption=` 判断密钥是否由硬件包装，和 vold 自己的做法一样，旧格式里单独的 `wrappedkey` 也算上。这一项还没有在手机上试过。
+- 解密停在读 `/data/unencrypted/mode`：现在没有它时，按 fstab 的 `fileencryption=` 判断密钥是否由硬件包装，和 vold 自己的做法一样，旧格式里单独的 `wrappedkey` 也算上。接着发现 data 分区里根本没有 `/data/unencrypted`：Android 16 的 vold 和三星较早的 vold 都把不属于任何用户的密钥放在那里。
+- 现在先看 init 一定会加密的目录（`/data/misc`、`/data/system`、`/data/vendor`、`/data/app`、`/data/local`）有没有加密策略：都没有，说明系统其实没有加密这些文件，data 直接打开；有策略却没有 `/data/unencrypted`，就报告这些目录用的是哪个密钥，并把 data 和 `/metadata` 顶层、`/metadata/vold` 里的文件名写进日志，找出这个 vold 把密钥放在哪里。这一项还没有在手机上试过。
+- 恢复出厂设置：这个移植的 fstab 去掉了 userdata 行的 `formattable`（`check,,fileencryption` 中间空着的就是原来的位置），系统开机时不会重新建立清空的 data 分区，Skyward 以前因此拒绝清除。现在像 Android 自己的 recovery 那样，由 Skyward 按 fstab 写的文件系统（f2fs，带 fstab 要求的压缩，按系统的 `external_storage.casefold.enabled` 决定是否忽略大小写）重新建立 data，再重建 `/metadata`；只有整个分区加密、又没说密钥放在哪里的才拒绝。第三方基底上，`external_storage.*` 属性和 `ro.hardware.*` 一样从已安装系统补上。这一项还没有在手机上试过。
 
 还没有确认，或者还不能用：
 
-- 解密的其余步骤：用 Keymaster 解开 `/data/unencrypted/key` 并和 `ref` 核对，再解开 `/data/misc/vold/user_keys` 里每个用户的密钥。这台手机上 Keymaster 还没有真正解开过任何密钥。第三方 recovery 通常只能解密 AOSP 类 ROM 的 data，三星自己的系统加密的 data 一般解不开；这里会不会也是这样，还要看手机上的结果。
+- 解密：这个移植的 vold（来自 SM-S9260 的 One UI 8.5）把密钥放在哪里还不知道，需要它的 `/system/bin/vold` 和上面写进日志的文件名来确定。Keymaster 在这台手机上还没有真正解开过任何密钥。第三方 recovery 通常只能解密 AOSP 类 ROM 的 data，三星自己的系统加密的 data 一般解不开。
 - hermesd（三星 Gatekeeper 的存储）的参数是 `/data/vendor/gatekeeper`，data 解开之前没有这个目录，它每秒退出一次，日志里一连串 `hermesd ... exit status: 1` 就是这个；data 解开以后它能否正常运行还没有看到。
-- 恢复出厂设置：这个移植的 fstab 去掉了 userdata 行的 `formattable`（`check,,fileencryption` 中间空着的就是原来的位置，原厂 fstab 有这个标志）。Skyward 只清除系统启动时会重新建立的 data 分区，也就是手机的表标为 `formattable` 的，所以拒绝清除。
 - 时间：persist 和 efs 里都没有时间偏移文件（`time/`），recovery 里的时钟没有设置。
-- WLAN：基底的内核没有 `dhd`，需要按第三节准备和基底内核匹配的 `dhd.ko` 和固件，现在 Skyward 报告 `dhd.ko is in none of ["/lib/modules"]`。`dhd.ko` 如果按 `DHD_LINUX_STD_FW_API` 编译（PCIe 默认如此），会通过内核的固件加载器请求 `bcmdhd_sta.bin`、`nvram.txt`、`bcmdhd_clm.blob`；如果 `dmesg` 里有 `request_firmware` 失败，就在 `[wlan]` 里用 `firmware` 把这些名字映射到 `system/etc/wifi` 下的文件。
+- WLAN：基底的内核不能加载系统的 `dhd.ko`。用第三节的 `--kernel`/`--dtbo` 打包的镜像运行系统自己的内核，`dhd`（按 `DHD_LINUX_STD_FW_API` 编译）通过内核的固件加载器请求 `bcmdhd_sta.bin`、`nvram.txt`、`bcmdhd_clm.blob`，原厂 vendor 的 ueventd.rc 让 ueventd 到 `/vendor/firmware/wifi/` 里找。这种镜像能否正常启动、触摸和 WLAN 是否工作，还没有在手机上试过；KernelSU 的内核部分在 recovery 里也会运行。
 - 显示密度按同分辨率、尺寸相近的小米 13 Ultra 取 560，没有设置圆角半径。
 - 备份 EFS 时包含 efs、sec_efs、modemst1、modemst2、fsg、fsc、persist；手机上缺少其中任何一个分区时备份会停止，需要按 `/dev/block/by-name` 调整。

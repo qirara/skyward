@@ -318,11 +318,22 @@ const FILE_MODE: &str = "/data/unencrypted/mode";
 /// Where the phone keeps each user's own keys.
 const USER_KEYS: &str = "/data/misc/vold/user_keys";
 
+/// How the phone encrypts its files: as its vold wrote it down when it
+/// made the partition, or, where it writes none of it, as Samsung's does
+/// not, as the phone's table asks, which is what vold takes it from.
+fn file_mode() -> Result<String> {
+    match std::fs::read_to_string(FILE_MODE) {
+        Ok(mode) => Ok(mode.trim().to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => encryption::mode_in_table(&table()?)
+            .with_context(|| format!("{FILE_MODE} is not there, and the phone's table says nothing of how its files are encrypted")),
+        Err(e) => Err(e).with_context(|| format!("read {FILE_MODE}")),
+    }
+}
+
 /// Let in the key for the files that belong to no one user. Until it is
 /// in, most of what the data partition holds reads as scrambled names.
 fn open_shared(service: &KeyService) -> Result<[u8; crate::fscrypt::NAME_BYTES]> {
-    let mode = std::fs::read_to_string(FILE_MODE).with_context(|| format!("read {FILE_MODE}"))?;
-    let wrapped = crate::fscrypt::hardware_wrapped(mode.trim());
+    let wrapped = crate::fscrypt::hardware_wrapped(&file_mode()?);
     let raw = hardware_key(service, Path::new(SHARED_KEY), wrapped)?;
     let name = crate::fscrypt::add_key(Path::new(MOUNT), &raw, wrapped)?;
     let recorded = crate::fscrypt::recorded_name(Path::new(SHARED_NAME))?;
@@ -348,8 +359,7 @@ fn users() -> Result<Vec<u32>> {
 /// Let in the keys for the files of each user that are readable before
 /// that user signs in, and give the users they belong to.
 fn open_users(service: &KeyService) -> Result<Vec<u32>> {
-    let mode = std::fs::read_to_string(FILE_MODE).with_context(|| format!("read {FILE_MODE}"))?;
-    let wrapped = crate::fscrypt::hardware_wrapped(mode.trim());
+    let wrapped = crate::fscrypt::hardware_wrapped(&file_mode()?);
     let users = users()?;
     for user in &users {
         let dir = Path::new(USER_KEYS).join("de").join(user.to_string());
@@ -555,8 +565,7 @@ fn open_user_files(service: &KeyService, user: u32, credential: Option<&[u8]>, o
     let synthetic_password = crate::user::open_inner(&secret, &inner)?;
     let file_secret = crate::user::file_secret(&synthetic_password);
 
-    let mode = std::fs::read_to_string(FILE_MODE).with_context(|| format!("read {FILE_MODE}"))?;
-    let wrapped = crate::fscrypt::hardware_wrapped(mode.trim());
+    let wrapped = crate::fscrypt::hardware_wrapped(&file_mode()?);
     let dir = Path::new(USER_KEYS).join("ce").join(user.to_string()).join("current");
     let stored = StoredKey::load(&dir).with_context(|| format!("read the key in {}", dir.display()))?;
     let raw = stored.unwrap(Unwrap::<KeyService>::Secret(&file_secret)).with_context(|| format!("unwrap the key in {}", dir.display()))?;

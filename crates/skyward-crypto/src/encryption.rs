@@ -73,6 +73,17 @@ pub fn made_afresh(entry: &Entry) -> bool {
     formattable && key_kept
 }
 
+/// How the first of `entries` that encrypts files one by one has them
+/// encrypted, written as vold writes it down. A table of the older kind
+/// gives the key as wrapped by the hardware in a flag of its own.
+pub fn mode_in_table(entries: &[Entry]) -> Option<String> {
+    entries.iter().find_map(|entry| {
+        let mode = entry.extra("fileencryption")?;
+        let wrapped = entry.extras.iter().any(|e| e == "wrappedkey") && !crate::fscrypt::hardware_wrapped(mode);
+        Some(if wrapped { format!("{mode}+wrappedkey_v0") } else { mode.to_string() })
+    })
+}
+
 /// Where the phone keeps the key for the filesystem an entry describes.
 pub fn key_dir(entry: &Entry) -> Result<PathBuf> {
     let dir = entry.extra("keydirectory").context("the phone says where the key for its data partition is not")?;
@@ -187,5 +198,22 @@ mod tests {
         assert_eq!(cipher, "aes-xts-plain64");
         assert_eq!(device, "/dev/block/by-name/userdata");
         assert!(wrapped);
+    }
+
+    #[test]
+    fn a_phone_whose_vold_writes_no_mode_encrypts_its_files_as_its_table_asks() {
+        // The S21 Ultra running a port of One UI 8.5: no wrapped key.
+        let port = "/dev/block/bootdevice/by-name/userdata /data f2fs noatime,nosuid,nodev,discard,inlinecrypt \
+                    latemount,wait,check,,fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized,quota,keydirectory=/metadata/vold/metadata_encryption";
+        let mode = mode_in_table(&skyward_block::fstab::entries(port)).unwrap();
+        assert_eq!(mode, "aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized");
+        assert!(!crate::fscrypt::hardware_wrapped(&mode));
+        // Samsung's stock table of the same phone, in the older form.
+        let stock = "/dev/block/bootdevice/by-name/userdata /data f2fs noatime,nosuid,nodev \
+                     latemount,wait,check,formattable,fileencryption=ice,wrappedkey,keydirectory=/metadata/vold/metadata_encryption,quota";
+        assert!(crate::fscrypt::hardware_wrapped(&mode_in_table(&skyward_block::fstab::entries(stock)).unwrap()), "the key wrapped by the hardware, in a flag of its own");
+        let newer = "/dev/block/by-name/userdata /data f2fs noatime latemount,wait,fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized+wrappedkey_v0,wrappedkey";
+        assert_eq!(mode_in_table(&skyward_block::fstab::entries(newer)).unwrap(), "aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized+wrappedkey_v0", "said once");
+        assert_eq!(mode_in_table(&skyward_block::fstab::entries("/dev/block/by-name/userdata /data ext4 noatime wait,check")), None);
     }
 }
